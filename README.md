@@ -91,7 +91,7 @@ enter:
 
 ```text
 Name: MediaForge Requests
-URL:  https://YOUR-GITHUB-USERNAME.github.io/YOUR-REPOSITORY/manifest.json
+URL:  https://daseric.github.io/Mediaforge-Jellyfin-Connector/manifest.json
 ```
 
 Install **MediaForge Requests** from the catalog and restart Jellyfin. Then
