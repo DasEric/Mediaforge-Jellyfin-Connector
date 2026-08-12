@@ -129,7 +129,11 @@ One-time setup:
 1. Push this directory to a GitHub repository.
 2. In **Settings > Pages > Build and deployment**, select **GitHub Actions** as
    the source.
-3. Publish version `0.2.0`:
+3. In **Settings > Environments > github-pages > Deployment branches and
+   tags**, keep **Selected branches and tags** and add a tag rule named `v*`.
+   This allows version tags to deploy the repository feed without permitting
+   arbitrary refs.
+4. Publish version `0.2.0`:
 
 ```powershell
 git tag -s v0.2.0 -m "MediaForge Requests 0.2.0"
