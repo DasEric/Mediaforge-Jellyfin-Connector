@@ -1,0 +1,14 @@
+{
+  "category": "General",
+  "changelog": "v0.2.0\n- Jellyfin-Repository mit automatischen Updates\n- Download-Fortschritt für Benutzer\n- Ausstehende Anfragen können zurückgezogen werden\n- Menüpunkt Anfragen für alle Benutzer\n- Zusätzliche Sicherheits- und Parallelitätshärtungen",
+  "description": "Durchsucht die in MediaForge aktivierten Film- und Serienquellen direkt in Jellyfin. Benutzer können Downloads anfragen; Administratoren können sie freigeben oder den direkten Modus aktivieren.",
+  "guid": "2ea7f67d-8e4d-4c84-bd5a-a5bcd713bb23",
+  "name": "MediaForge Requests",
+  "overview": "MediaForge-Suche und Download-Anfragen für alle Jellyfin-Benutzer",
+  "owner": "MediaForge Jellyfin Connector contributors",
+  "targetAbi": "10.11.0.0",
+  "timestamp": "2026-08-12T00:00:00Z",
+  "version": "0.2.0.0",
+  "status": "Active",
+  "autoUpdate": true
+}

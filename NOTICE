@@ -1,0 +1,10 @@
+The Jellyfin web-injection compatibility approach is based on the GPL-3.0
+project "Jellyfin-AniWorld-Downloader" by SiroxCW and contributors:
+https://github.com/SiroxCW/Jellyfin-AniWorld-Downloader
+
+MediaForge is developed by PD-Codes and contributors:
+https://github.com/PD-Codes/MediaForge
+
+This repository does not include or distribute media. Users are responsible
+for complying with applicable law and the terms of every configured source.
+
