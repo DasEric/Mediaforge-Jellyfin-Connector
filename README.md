@@ -8,6 +8,8 @@ movie and TV sources enabled in MediaForge.
 - Automatic mode: selected content is added to the MediaForge download queue
   immediately.
 - Search all enabled MediaForge sources or select individual sources.
+- Browse clickable New, Popular, and Movies rows from MediaForge immediately
+  when opening the Requests page.
 - Select entire seasons or individual episodes; movies are shown as a single
   selection.
 - Each user has a personal status view, while administrators have a shared
@@ -141,11 +143,11 @@ One-time setup:
    tags**, keep **Selected branches and tags** and add a tag rule named `v*`.
    This allows version tags to deploy the repository feed without permitting
    arbitrary refs.
-4. Publish version `0.2.4`:
+4. Publish version `0.2.5`:
 
 ```powershell
-git tag -a v0.2.4 -m "MediaForge Requests 0.2.4"
-git push origin v0.2.4
+git tag -a v0.2.5 -m "MediaForge Requests 0.2.5"
+git push origin v0.2.5
 ```
 
 After the workflow completes successfully, the Jellyfin feed is available at:
@@ -158,11 +160,11 @@ For a later update, update all version references atomically, review the
 changelog, and push the matching tag:
 
 ```powershell
-.\scripts\set-version.ps1 -Version 0.2.5
+.\scripts\set-version.ps1 -Version 0.2.6
 git add .
-git commit -m "Release 0.2.5"
-git tag -a v0.2.5 -m "MediaForge Requests 0.2.5"
-git push origin main v0.2.5
+git commit -m "Release 0.2.6"
+git tag -a v0.2.6 -m "MediaForge Requests 0.2.6"
+git push origin main v0.2.6
 ```
 
 Jellyfin recognizes the newer version during its next plugin update check by
@@ -174,7 +176,7 @@ directory, but Jellyfin's plugin updater cannot install that module in
 MediaForge.
 
 The Jellyfin plugin can also be installed manually. Extract
-`dist/MediaForgeRequests_0.2.4.zip` to
+`dist/MediaForgeRequests_0.2.5.zip` to
 `/var/lib/jellyfin/plugins/MediaForgeRequests/`. The destination directory must
 contain `Jellyfin.Plugin.MediaForge.dll` and `meta.json`.
 
@@ -193,8 +195,8 @@ If `dotnet` is not available through `PATH`:
 The build creates:
 
 - `dist/Jellyfin.Plugin.MediaForge.dll`
-- `dist/MediaForgeRequests_0.2.4.zip`
-- `dist/mediaforge_jellyfin_connector_0.2.4.zip`
+- `dist/MediaForgeRequests_0.2.5.zip`
+- `dist/mediaforge_jellyfin_connector_0.2.5.zip`
 - `dist/SHA256SUMS.txt`
 
 Remove all generated build output, repository manifests, and local test caches

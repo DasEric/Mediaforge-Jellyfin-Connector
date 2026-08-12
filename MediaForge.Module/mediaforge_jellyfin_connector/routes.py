@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 from flask import Blueprint, current_app, jsonify, request
 
 from ....models.common.common import get_ffmpeg_progress
@@ -149,6 +151,16 @@ def create_blueprint(app, enabled_setting_key: str):
         for key, name in _ROUTE_NAMES.items()
     }
 
+    def late_internal(endpoint: str):
+        # MediaForge registers browse/image routes after discovering modules.
+        # Resolve these two handlers only when a request arrives, by which time
+        # application startup is complete. This also works for a live module
+        # install, where the handlers already exist.
+        view = current_app.view_functions.get(endpoint)
+        if view is None:
+            return None
+        return _without_mediaforge_session_login(view)
+
     bp = Blueprint("mediaforge_jellyfin_connector", __name__)
 
     def guard(scope: str):
@@ -165,7 +177,7 @@ def create_blueprint(app, enabled_setting_key: str):
             {
                 "ok": True,
                 "module": "mediaforge_jellyfin_connector",
-                "version": "0.2.4",
+                "version": "0.2.5",
             }
         )
 
@@ -296,6 +308,47 @@ def create_blueprint(app, enabled_setting_key: str):
                 items.append(progress)
         return jsonify({"items": items})
 
+    @bp.get("/api/v1/connector/discover")
+    def api_connector_discover():
+        auth_error = guard("library:read")
+        if auth_error:
+            return auth_error
+        # The MediaForge home feed accepts adult/limit query parameters. The
+        # connector deliberately exposes neither: adult content remains an
+        # explicit Jellyfin administrator decision, and MediaForge's bounded
+        # configured row limit is used as-is.
+        if request.args:
+            return jsonify({"error": "unexpected query parameters"}), 400
+        handler = late_internal("api_home_feed")
+        return handler() if handler is not None else (jsonify({"error": "home feed unavailable"}), 503)
+
+    @bp.get("/api/v1/connector/image")
+    def api_connector_image():
+        auth_error = guard("library:read")
+        if auth_error:
+            return auth_error
+        if set(request.args) != {"url"}:
+            return jsonify({"error": "url query field required"}), 400
+        raw_url = request.args.get("url", "").strip()
+        if not _safe_text(raw_url, _MAX_URL_LENGTH):
+            return jsonify({"error": "invalid image URL"}), 400
+        try:
+            parsed = urlsplit(raw_url)
+        except ValueError:
+            return jsonify({"error": "invalid image URL"}), 400
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+        ):
+            return jsonify({"error": "invalid image URL"}), 400
+        # MediaForge's own image handler performs the authoritative hostname
+        # allowlist and DNS/IP SSRF checks before any network request.
+        handler = late_internal("api_image_proxy")
+        return handler() if handler is not None else (jsonify({"error": "image proxy unavailable"}), 503)
+
     # MediaForge's current startup pass reads ``_V1_ENDPOINT_SCOPES`` and
     # correctly leaves these views free of its session-login wrapper.  A
     # module installed or refreshed in an already running MediaForge process,
@@ -319,6 +372,8 @@ def create_blueprint(app, enabled_setting_key: str):
         "mediaforge_jellyfin_connector.api_connector_providers": api_connector_providers,
         "mediaforge_jellyfin_connector.api_connector_download": api_connector_download,
         "mediaforge_jellyfin_connector.api_connector_progress": api_connector_progress,
+        "mediaforge_jellyfin_connector.api_connector_discover": api_connector_discover,
+        "mediaforge_jellyfin_connector.api_connector_image": api_connector_image,
     }
 
     @bp.before_request
@@ -352,6 +407,8 @@ def create_blueprint(app, enabled_setting_key: str):
             "mediaforge_jellyfin_connector.api_connector_providers": "library:read",
             "mediaforge_jellyfin_connector.api_connector_download": "queue:write",
             "mediaforge_jellyfin_connector.api_connector_progress": "queue:read",
+            "mediaforge_jellyfin_connector.api_connector_discover": "library:read",
+            "mediaforge_jellyfin_connector.api_connector_image": "library:read",
         }
     )
     return bp, scopes

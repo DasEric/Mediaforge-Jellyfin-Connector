@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Jellyfin.Plugin.MediaForge;
 using Jellyfin.Plugin.MediaForge.Configuration;
 using Jellyfin.Plugin.MediaForge.Api;
@@ -17,7 +18,9 @@ try
     TestSecretStore(testRoot);
     TestConfigurationSerialization();
     TestAuthorizationBoundaries();
+    TestApiJsonContracts();
     TestPluginPageRegistration();
+    TestRequestPageContract();
     TestWebInjection();
     TestMediaGrants();
     TestRateLimiter();
@@ -75,6 +78,25 @@ static void TestPluginPageRegistration()
     Assert(html.Contains("id=\"mfApiKey\"", StringComparison.Ordinal), "The MediaForge API-key input is missing from settings.");
 }
 
+static void TestRequestPageContract()
+{
+    var assembly = typeof(Plugin).Assembly;
+    using var scriptStream = assembly.GetManifestResourceStream("Jellyfin.Plugin.MediaForge.Web.requests.js")
+        ?? throw new InvalidOperationException("Embedded requests script is missing.");
+    using var scriptReader = new StreamReader(scriptStream, Encoding.UTF8);
+    var script = scriptReader.ReadToEnd();
+    Assert(script.Contains("call('Discover')", StringComparison.Ordinal), "The Requests page does not load MediaForge discovery rows.");
+    Assert(script.Contains("URL.createObjectURL", StringComparison.Ordinal), "Poster images are not loaded through authenticated blobs.");
+    Assert(!script.Contains("accessToken()", StringComparison.Ordinal), "The Requests page must not embed the Jellyfin token in image URLs.");
+    Assert(!script.Contains("api_key", StringComparison.OrdinalIgnoreCase), "The Requests page must not put API keys in URLs.");
+
+    using var htmlStream = assembly.GetManifestResourceStream("Jellyfin.Plugin.MediaForge.Web.requests.html")
+        ?? throw new InvalidOperationException("Embedded requests page is missing.");
+    using var htmlReader = new StreamReader(htmlStream, Encoding.UTF8);
+    var html = htmlReader.ReadToEnd();
+    Assert(html.Contains("data-mf=\"discover\"", StringComparison.Ordinal), "The Requests page has no discovery container.");
+}
+
 static void TestAuthorizationBoundaries()
 {
     var controller = typeof(MediaForgeRequestsController);
@@ -86,6 +108,8 @@ static void TestAuthorizationBoundaries()
     {
         nameof(MediaForgeRequestsController.GetStatus),
         nameof(MediaForgeRequestsController.GetSources),
+        nameof(MediaForgeRequestsController.Discover),
+        nameof(MediaForgeRequestsController.Image),
         nameof(MediaForgeRequestsController.Search),
         nameof(MediaForgeRequestsController.GetSeries),
         nameof(MediaForgeRequestsController.GetSeasons),
@@ -122,6 +146,40 @@ static void TestAuthorizationBoundaries()
             .Cast<AuthorizeAttribute>()
             .Select(attribute => attribute.Policy);
         Assert(policies.Contains(Policies.RequiresElevation), $"Admin endpoint {methodName} is missing the elevation policy.");
+    }
+}
+
+static void TestApiJsonContracts()
+{
+    AssertJsonNames("SourceInfo", new Dictionary<string, string>
+    {
+        ["Id"] = "id",
+        ["Label"] = "label",
+        ["Adult"] = "adult",
+    });
+    AssertJsonNames("SearchGroup", new Dictionary<string, string>
+    {
+        ["Source"] = "source",
+        ["Label"] = "label",
+        ["Data"] = "data",
+        ["Error"] = "error",
+    });
+}
+
+static void AssertJsonNames(string nestedTypeName, IReadOnlyDictionary<string, string> expected)
+{
+    var type = typeof(MediaForgeRequestsController).GetNestedType(
+        nestedTypeName,
+        System.Reflection.BindingFlags.NonPublic)
+        ?? throw new InvalidOperationException($"Missing API response type {nestedTypeName}.");
+    foreach (var pair in expected)
+    {
+        var property = type.GetProperty(pair.Key)
+            ?? throw new InvalidOperationException($"Missing {nestedTypeName}.{pair.Key}.");
+        var attribute = property.GetCustomAttributes(typeof(JsonPropertyNameAttribute), inherit: true)
+            .Cast<JsonPropertyNameAttribute>()
+            .SingleOrDefault();
+        Assert(attribute?.Name == pair.Value, $"{nestedTypeName}.{pair.Key} must serialize as {pair.Value}.");
     }
 }
 

@@ -20,6 +20,9 @@ public sealed class MediaAccessGrantStore
         GrantUrls(userId, source, urls);
     }
 
+    public void GrantUrl(string userId, string source, string url)
+        => GrantUrls(userId, source, [url]);
+
     public bool IsGranted(string userId, string url, out string source)
     {
         source = string.Empty;

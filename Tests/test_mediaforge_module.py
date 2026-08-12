@@ -159,6 +159,18 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
                 view_func=_mediaforge_login_required(self._internal(endpoint)),
                 methods=["GET", "POST"],
             )
+        self.app.add_url_rule(
+            "/internal/home-feed",
+            endpoint="api_home_feed",
+            view_func=_mediaforge_login_required(
+                lambda: jsonify({"rows": {"new": [{"title": "Example"}]}})
+            ),
+        )
+        self.app.add_url_rule(
+            "/internal/image",
+            endpoint="api_image_proxy",
+            view_func=_mediaforge_login_required(lambda: (b"image", 200, {"Content-Type": "image/jpeg"})),
+        )
         blueprint, _scopes = routes.create_blueprint(self.app, "connector_enabled")
         self.app.register_blueprint(blueprint)
 
@@ -190,6 +202,33 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
         )
         self.assertEqual(200, response.status_code)
         self.assertTrue(response.get_json()["ok"])
+
+    def test_discovery_does_not_require_a_mediaforge_web_session(self):
+        response = self.client.get(
+            "/api/v1/connector/discover",
+            headers={"X-Api-Key": "library:read-key"},
+        )
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("Example", response.get_json()["rows"]["new"][0]["title"])
+
+    def test_image_proxy_requires_scope_and_rejects_non_http_urls(self):
+        response = self.client.get(
+            "/api/v1/connector/image?url=https%3A%2F%2Fallowed.invalid%2Fposter.jpg"
+        )
+        self.assertEqual(401, response.status_code)
+
+        response = self.client.get(
+            "/api/v1/connector/image?url=file%3A%2F%2F%2Fetc%2Fpasswd",
+            headers={"X-Api-Key": "library:read-key"},
+        )
+        self.assertEqual(400, response.status_code)
+
+        response = self.client.get(
+            "/api/v1/connector/image?url=https%3A%2F%2Fallowed.invalid%2Fposter.jpg",
+            headers={"X-Api-Key": "library:read-key"},
+        )
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("image/jpeg", response.content_type)
 
     def test_arbitrary_url_is_rejected_before_internal_handler(self):
         response = self.client.get(

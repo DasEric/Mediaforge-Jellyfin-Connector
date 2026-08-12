@@ -9,7 +9,8 @@
     .mf-field label{display:block;font-size:.85rem;margin:0 0 .3rem;opacity:.75}.mf-input,.mf-select{width:100%;box-sizing:border-box;border:1px solid rgba(255,255,255,.2);border-radius:.4rem;background:rgba(0,0,0,.22);color:inherit;padding:.72rem}
     .mf-btn{border:0;border-radius:.4rem;padding:.72rem 1rem;background:#00a4dc;color:#fff;cursor:pointer;font-weight:600}.mf-btn.secondary{background:rgba(255,255,255,.11);color:inherit}.mf-btn.danger{background:#9f2d38}.mf-btn:disabled{opacity:.5;cursor:default}
     .mf-results{display:grid;grid-template-columns:repeat(auto-fill,minmax(185px,1fr));gap:.8rem;margin-top:1rem}.mf-card{border:1px solid rgba(255,255,255,.12);border-radius:.55rem;background:rgba(255,255,255,.055);overflow:hidden;cursor:pointer;min-height:115px;display:flex;flex-direction:column}.mf-card:hover{border-color:#00a4dc;transform:translateY(-1px)}
-    .mf-cover{aspect-ratio:16/9;object-fit:cover;width:100%;background:linear-gradient(135deg,#152f42,#281b3e)}.mf-cardbody{padding:.75rem}.mf-cardtitle{font-weight:650;line-height:1.25}.mf-source{font-size:.78rem;opacity:.65;margin-top:.35rem}
+    .mf-cover{aspect-ratio:2/3;object-fit:cover;width:100%;background:linear-gradient(135deg,#152f42,#281b3e)}.mf-cardbody{padding:.75rem}.mf-cardtitle{font-weight:650;line-height:1.25}.mf-source{font-size:.78rem;opacity:.65;margin-top:.35rem}
+    .mf-discover{margin-top:1.25rem}.mf-discoverrow{margin:0 0 1.5rem}.mf-discoverhead{font-size:1.2rem;margin:0 0 .65rem}.mf-discovergrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:.8rem}
     .mf-notice{padding:.75rem;border-radius:.45rem;background:rgba(0,164,220,.12);margin:.75rem 0}.mf-error{background:rgba(190,45,55,.17);color:#ffb5bb}.mf-empty{padding:2rem;text-align:center;opacity:.65}
     .mf-list{display:grid;gap:.65rem}.mf-request{border:1px solid rgba(255,255,255,.12);border-radius:.5rem;padding:.85rem;background:rgba(255,255,255,.045)}.mf-requesttop{display:flex;justify-content:space-between;gap:.7rem;align-items:flex-start}.mf-requesttitle{font-weight:650}.mf-meta{font-size:.82rem;opacity:.68;margin-top:.35rem}.mf-actions{display:flex;gap:.45rem;flex-wrap:wrap;margin-top:.65rem}
     .mf-pill{font-size:.75rem;padding:.24rem .5rem;border-radius:999px;background:rgba(255,255,255,.1)}.mf-pill.pending{background:rgba(247,183,49,.2)}.mf-pill.queued,.mf-pill.completed{background:rgba(45,180,90,.2)}.mf-pill.failed,.mf-pill.partial,.mf-pill.cancelled,.mf-pill.rejected{background:rgba(190,45,55,.2)}
@@ -34,6 +35,7 @@
         <div class="mf-field"><label>Quelle</label><select class="mf-select" data-mf="source"><option value="all">Alle Quellen</option></select></div>
         <button class="mf-btn" type="submit">Suchen</button>
       </form>
+      <div class="mf-discover" data-mf="discover"><div class="mf-empty">Filme und Serien werden geladen…</div></div>
       <div class="mf-results" data-mf="results"></div>
     </section>
     <section class="mf-panel" data-panel="mine"><div class="mf-actions"><button class="mf-btn secondary" data-mf="refresh-mine" type="button">Aktualisieren</button></div><div class="mf-list" data-mf="mine"></div></section>

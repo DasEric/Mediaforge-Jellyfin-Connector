@@ -9,6 +9,7 @@ namespace Jellyfin.Plugin.MediaForge.Services;
 public sealed class MediaForgeClient
 {
     private const int MaxResponseBytes = 16 * 1024 * 1024;
+    private const int MaxImageBytes = 8 * 1024 * 1024;
     private readonly HttpClient _httpClient;
     private readonly SecretStore _secrets;
 
@@ -41,6 +42,75 @@ public sealed class MediaForgeClient
 
     public Task<JsonElement> GetProgressAsync(IReadOnlyCollection<long> queueIds, CancellationToken cancellationToken)
         => SendAsync(HttpMethod.Post, "api/v1/connector/progress", new { queue_ids = queueIds }, cancellationToken);
+
+    public Task<JsonElement> GetDiscoverAsync(CancellationToken cancellationToken)
+        => SendAsync(HttpMethod.Get, "api/v1/connector/discover", null, cancellationToken);
+
+    public async Task<MediaForgeImage> GetImageAsync(string url, CancellationToken cancellationToken)
+    {
+        using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutSource.CancelAfter(TimeSpan.FromSeconds(30));
+        var requestToken = timeoutSource.Token;
+        var config = Plugin.Instance?.Configuration
+            ?? throw new MediaForgeException(HttpStatusCode.ServiceUnavailable, "Plugin-Konfiguration ist nicht verfügbar.");
+        var apiKey = _secrets.GetApiKey();
+        if (apiKey is null)
+        {
+            throw new MediaForgeException(HttpStatusCode.ServiceUnavailable, "In Jellyfin ist kein gültiger MediaForge-API-Schlüssel konfiguriert.");
+        }
+
+        var path = "api/v1/connector/image?url=" + Uri.EscapeDataString(url);
+        using var request = new HttpRequestMessage(HttpMethod.Get, BuildUri(config.MediaForgeUrl, path));
+        request.Headers.Add("X-Api-Key", apiKey);
+
+        try
+        {
+            using var response = await _httpClient.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                requestToken).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                throw SafeUpstreamError(response.StatusCode);
+            }
+
+            var mediaType = response.Content.Headers.ContentType?.MediaType ?? string.Empty;
+            if (!mediaType.StartsWith("image/", StringComparison.OrdinalIgnoreCase)
+                || response.Content.Headers.ContentLength > MaxImageBytes)
+            {
+                throw new MediaForgeException(HttpStatusCode.BadGateway, "MediaForge hat keine gültige Bildantwort geliefert.");
+            }
+
+            await using var stream = await response.Content.ReadAsStreamAsync(requestToken).ConfigureAwait(false);
+            using var buffer = new MemoryStream();
+            var chunk = new byte[81920];
+            while (true)
+            {
+                var read = await stream.ReadAsync(chunk, requestToken).ConfigureAwait(false);
+                if (read == 0)
+                {
+                    break;
+                }
+
+                if (buffer.Length + read > MaxImageBytes)
+                {
+                    throw new MediaForgeException(HttpStatusCode.BadGateway, "MediaForge hat eine unerwartet große Bildantwort geliefert.");
+                }
+
+                buffer.Write(chunk, 0, read);
+            }
+
+            return new MediaForgeImage(buffer.ToArray(), mediaType);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new MediaForgeException(HttpStatusCode.GatewayTimeout, "MediaForge hat beim Laden des Bildes nicht rechtzeitig geantwortet.");
+        }
+        catch (HttpRequestException)
+        {
+            throw new MediaForgeException(HttpStatusCode.BadGateway, "Das Bild konnte nicht sicher von MediaForge geladen werden.");
+        }
+    }
 
     public async Task<long?> QueueAsync(MediaRequest request, CancellationToken cancellationToken)
     {
@@ -204,6 +274,8 @@ public sealed class MediaForgeClient
         };
     }
 }
+
+public sealed record MediaForgeImage(byte[] Data, string MediaType);
 
 /// <summary>Error returned while talking to MediaForge.</summary>
 public sealed class MediaForgeException : Exception

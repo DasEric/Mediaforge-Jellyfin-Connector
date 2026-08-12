@@ -90,6 +90,72 @@ public sealed class MediaForgeRequestsController : ControllerBase
         }
     }
 
+    [HttpGet("Discover")]
+    public async Task<IActionResult> Discover(CancellationToken cancellationToken)
+    {
+        var (userId, _) = CurrentUser();
+        if (!Allow(userId, "discover", 12))
+        {
+            return RateLimitExceeded();
+        }
+
+        try
+        {
+            var sourcesTask = _mediaForge.GetSourcesAsync(cancellationToken);
+            var discoverTask = _mediaForge.GetDiscoverAsync(cancellationToken);
+            await Task.WhenAll(sourcesTask, discoverTask).ConfigureAwait(false);
+
+            var allowed = ReadAllowedSources(await sourcesTask.ConfigureAwait(false))
+                .ToDictionary(source => source.Id, source => source.Label, StringComparer.OrdinalIgnoreCase);
+            var rows = new Dictionary<string, IReadOnlyList<DiscoverItem>>(StringComparer.Ordinal)
+            {
+                ["new"] = ReadDiscoverRow(await discoverTask.ConfigureAwait(false), "new", allowed),
+                ["popular"] = ReadDiscoverRow(await discoverTask.ConfigureAwait(false), "popular", allowed),
+                ["movies"] = ReadDiscoverRow(await discoverTask.ConfigureAwait(false), "movies", allowed),
+            };
+
+            foreach (var item in rows.Values.SelectMany(items => items))
+            {
+                _grants.GrantUrl(userId, item.Source, item.Url);
+            }
+
+            return Ok(new { rows });
+        }
+        catch (MediaForgeException exception)
+        {
+            return MediaForgeError(exception);
+        }
+    }
+
+    [HttpGet("Image")]
+    [Produces("image/jpeg", "image/png", "image/webp", "image/gif", "image/avif")]
+    public async Task<IActionResult> Image(
+        [Required, MaxLength(2048)] string url,
+        CancellationToken cancellationToken)
+    {
+        var (userId, _) = CurrentUser();
+        if (!Allow(userId, "image", 240))
+        {
+            return RateLimitExceeded();
+        }
+
+        if (!TryReadMediaForgeImageUrl(url, out var normalized))
+        {
+            return BadRequest(new { error = "Ungültige Bild-URL." });
+        }
+
+        try
+        {
+            var image = await _mediaForge.GetImageAsync(normalized, cancellationToken).ConfigureAwait(false);
+            Response.Headers.CacheControl = "private, max-age=86400";
+            return File(image.Data, image.MediaType);
+        }
+        catch (MediaForgeException)
+        {
+            return NotFound();
+        }
+    }
+
     [HttpGet("Search")]
     public async Task<IActionResult> Search(
         [Required, MinLength(2), MaxLength(120)] string query,
@@ -600,6 +666,113 @@ public sealed class MediaForgeRequestsController : ControllerBase
         return output;
     }
 
+    private static IReadOnlyList<DiscoverItem> ReadDiscoverRow(
+        JsonElement response,
+        string rowName,
+        IReadOnlyDictionary<string, string> allowedSources)
+    {
+        const int maxItemsPerRow = 18;
+        var output = new List<DiscoverItem>();
+        if (response.ValueKind != JsonValueKind.Object
+            || !response.TryGetProperty("rows", out var rows)
+            || rows.ValueKind != JsonValueKind.Object
+            || !rows.TryGetProperty(rowName, out var row)
+            || row.ValueKind != JsonValueKind.Array)
+        {
+            return output;
+        }
+
+        foreach (var item in row.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            var source = ReadJsonString(item, "source", 80);
+            var title = ReadJsonString(item, "title", 300);
+            var rawUrl = ReadJsonString(item, "url", 2048);
+            if (!allowedSources.TryGetValue(source, out var sourceLabel)
+                || string.IsNullOrWhiteSpace(title)
+                || !MediaAccessGrantStore.TryNormalizeUrl(rawUrl, out var normalizedUrl))
+            {
+                continue;
+            }
+
+            var posterUrl = ReadJsonString(item, "poster_url", 4096);
+            if (!posterUrl.StartsWith("/api/img?", StringComparison.Ordinal))
+            {
+                posterUrl = string.Empty;
+            }
+
+            var mediaType = ReadJsonString(item, "media_type", 20);
+            output.Add(new DiscoverItem(
+                SafeIdentity(title),
+                normalizedUrl,
+                source,
+                sourceLabel,
+                mediaType == "movies" ? "movie" : "series",
+                posterUrl,
+                ReadJsonString(item, "year", 16)));
+            if (output.Count >= maxItemsPerRow)
+            {
+                break;
+            }
+        }
+
+        return output;
+    }
+
+    private static string ReadJsonString(JsonElement item, string name, int maximum)
+    {
+        if (!item.TryGetProperty(name, out var value))
+        {
+            return string.Empty;
+        }
+
+        var text = value.ValueKind switch
+        {
+            JsonValueKind.String => value.GetString() ?? string.Empty,
+            JsonValueKind.Number => value.GetRawText(),
+            _ => string.Empty,
+        };
+        return text.Length <= maximum && !text.Any(char.IsControl) ? text.Trim() : string.Empty;
+    }
+
+    private static bool TryReadMediaForgeImageUrl(string value, out string normalized)
+    {
+        normalized = string.Empty;
+        if (string.IsNullOrWhiteSpace(value)
+            || value.Length > 4096
+            || !value.StartsWith("/api/img?", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var query = value[(value.IndexOf('?', StringComparison.Ordinal) + 1)..];
+        string? rawUrl = null;
+        try
+        {
+            foreach (var pair in query.Split('&', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var separator = pair.IndexOf('=', StringComparison.Ordinal);
+                var name = Uri.UnescapeDataString(separator >= 0 ? pair[..separator] : pair);
+                if (!string.Equals(name, "url", StringComparison.Ordinal) || rawUrl is not null)
+                {
+                    return false;
+                }
+
+                rawUrl = Uri.UnescapeDataString(separator >= 0 ? pair[(separator + 1)..] : string.Empty);
+            }
+        }
+        catch (UriFormatException)
+        {
+            return false;
+        }
+
+        return rawUrl is not null && MediaAccessGrantStore.TryNormalizeUrl(rawUrl, out normalized);
+    }
+
     private static IReadOnlyList<ProgressInfo> ReadProgress(JsonElement response, IReadOnlyCollection<long> requestedIds)
     {
         var output = new List<ProgressInfo>();
@@ -671,15 +844,31 @@ public sealed class MediaForgeRequestsController : ControllerBase
         return StatusCode(status, new { error = exception.Message });
     }
 
-    private sealed record SourceInfo(string Id, string Label, bool Adult);
+    private sealed record SourceInfo(
+        [property: JsonPropertyName("id")] string Id,
+        [property: JsonPropertyName("label")] string Label,
+        [property: JsonPropertyName("adult")] bool Adult);
 
-    private sealed record SearchGroup(string Source, string Label, JsonElement? Data, string? Error);
+    private sealed record SearchGroup(
+        [property: JsonPropertyName("source")] string Source,
+        [property: JsonPropertyName("label")] string Label,
+        [property: JsonPropertyName("data")] JsonElement? Data,
+        [property: JsonPropertyName("error")] string? Error);
+
+    private sealed record DiscoverItem(
+        [property: JsonPropertyName("title")] string Title,
+        [property: JsonPropertyName("url")] string Url,
+        [property: JsonPropertyName("source")] string Source,
+        [property: JsonPropertyName("source_label")] string SourceLabel,
+        [property: JsonPropertyName("media_type")] string MediaType,
+        [property: JsonPropertyName("poster_url")] string PosterUrl,
+        [property: JsonPropertyName("year")] string Year);
 
     private sealed record ProgressInfo(
         [property: JsonPropertyName("queue_id")] long QueueId,
-        string Status,
+        [property: JsonPropertyName("status")] string Status,
         [property: JsonPropertyName("current_episode")] int CurrentEpisode,
         [property: JsonPropertyName("total_episodes")] int TotalEpisodes,
-        double Percent,
-        string Phase);
+        [property: JsonPropertyName("percent")] double Percent,
+        [property: JsonPropertyName("phase")] string Phase);
 }

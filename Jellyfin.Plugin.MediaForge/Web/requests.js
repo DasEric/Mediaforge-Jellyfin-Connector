@@ -51,8 +51,35 @@ export default function (view, params) {
       (data.sources || []).forEach((item) => {
         const option = document.createElement('option'); option.value = item.id; option.textContent = item.label; q('source').appendChild(option);
       });
+      await loadDiscover();
       await detectAdmin();
     } catch (error) { notice(error.message, true); }
+  }
+  async function loadDiscover(retry) {
+    const host = q('discover');
+    try {
+      const data = await call('Discover');
+      const definitions = [['new', 'Neu'], ['popular', 'Beliebt'], ['movies', 'Filme']];
+      const total = definitions.reduce((count, row) => count + ((data.rows && data.rows[row[0]]) || []).length, 0);
+      if (!total && !retry) {
+        setTimeout(() => loadDiscover(true), 2500);
+        return;
+      }
+      host.innerHTML = '';
+      definitions.forEach((definition) => {
+        const items = (data.rows && data.rows[definition[0]]) || [];
+        if (!items.length) return;
+        const section = document.createElement('section'); section.className = 'mf-discoverrow';
+        const heading = document.createElement('h3'); heading.className = 'mf-discoverhead'; heading.textContent = definition[1];
+        const grid = document.createElement('div'); grid.className = 'mf-discovergrid';
+        items.forEach((item) => grid.appendChild(createMediaCard(item, item.source, item.source_label)));
+        section.append(heading, grid); host.appendChild(section);
+      });
+      if (!host.children.length) host.innerHTML = '<div class="mf-empty">Zurzeit sind keine Empfehlungen verfügbar.</div>';
+    } catch (error) {
+      host.innerHTML = '';
+      const box = document.createElement('div'); box.className = 'mf-notice mf-error'; box.textContent = 'Startansicht: ' + error.message; host.appendChild(box);
+    }
   }
   async function detectAdmin() {
     try {
@@ -75,16 +102,41 @@ export default function (view, params) {
     groups.forEach((group) => {
       const results = group.data && Array.isArray(group.data.results) ? group.data.results : [];
       results.forEach((item) => {
-        const card = document.createElement('article'); card.className = 'mf-card'; card.tabIndex = 0;
-        const body = document.createElement('div'); body.className = 'mf-cardbody';
-        const title = document.createElement('div'); title.className = 'mf-cardtitle'; title.textContent = item.title || item.name || 'Unbekannter Titel';
-        const source = document.createElement('div'); source.className = 'mf-source'; source.textContent = group.label + (item.year ? ' · ' + item.year : '');
-        body.append(title, source); card.appendChild(body);
-        const open = () => openDetail(item, group.source); card.addEventListener('click', open); card.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(); }); host.appendChild(card); count++;
+        host.appendChild(createMediaCard(item, group.source, group.label)); count++;
       });
       if (group.error) { hasError = true; const box = document.createElement('div'); box.className = 'mf-notice mf-error'; box.textContent = group.label + ': ' + group.error; host.appendChild(box); }
     });
     if (!count && !hasError) host.innerHTML = '<div class="mf-empty">Keine Treffer gefunden.</div>';
+  }
+
+  function createMediaCard(item, sourceId, sourceLabel) {
+    const card = document.createElement('article'); card.className = 'mf-card'; card.tabIndex = 0;
+    if (item.poster_url) {
+      const cover = document.createElement('img'); cover.className = 'mf-cover'; cover.loading = 'lazy'; cover.alt = '';
+      card.appendChild(cover); loadCover(cover, item.poster_url);
+    }
+    const body = document.createElement('div'); body.className = 'mf-cardbody';
+    const title = document.createElement('div'); title.className = 'mf-cardtitle'; title.textContent = item.title || item.name || 'Unbekannter Titel';
+    const source = document.createElement('div'); source.className = 'mf-source'; source.textContent = (sourceLabel || sourceId || '') + (item.year ? ' · ' + item.year : '');
+    body.append(title, source); card.appendChild(body);
+    const open = () => openDetail(item, sourceId); card.addEventListener('click', open); card.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); } });
+    return card;
+  }
+
+  async function loadCover(image, posterUrl) {
+    let objectUrl = '';
+    try {
+      const response = await api.fetch({ url: url('Image', { url: posterUrl }), type: 'GET' });
+      if (!response || typeof response.blob !== 'function') throw new Error('Ungültige Bildantwort');
+      const blob = await response.blob();
+      if (!blob.type.startsWith('image/')) throw new Error('Ungültiger Bildtyp');
+      objectUrl = URL.createObjectURL(blob); image.src = objectUrl;
+      image.addEventListener('load', () => URL.revokeObjectURL(objectUrl), { once: true });
+      image.addEventListener('error', () => { URL.revokeObjectURL(objectUrl); image.remove(); }, { once: true });
+    } catch (_) {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      image.remove();
+    }
   }
 
   async function openDetail(item, source) {
@@ -95,7 +147,7 @@ export default function (view, params) {
     setOptions(q('provider'), [state.status.defaultProvider || 'VOE'], state.status.defaultProvider);
     try {
       const [detail, seasons] = await Promise.all([call('Series', { query: { url: rawUrl } }), call('Seasons', { query: { url: rawUrl } })]);
-      state.detail = Object.assign({}, item, detail, { url: detail.url || rawUrl }); state.seasons = seasons.seasons || [];
+      state.detail = Object.assign({}, item, detail, { url: detail.url || rawUrl, is_movie: detail.is_movie === true || item.media_type === 'movie' }); state.seasons = seasons.seasons || [];
       q('detail-title').textContent = state.detail.title || item.title || item.name || 'Unbekannter Titel'; q('description').textContent = state.detail.description || 'Keine Beschreibung verfügbar.';
       renderSeasons(); if (state.seasons.length === 1 && state.seasons[0].is_single_movie) await loadSeason(0);
     } catch (error) { q('description').textContent = error.message; }
