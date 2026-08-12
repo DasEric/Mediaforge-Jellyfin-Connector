@@ -19,6 +19,8 @@ public sealed class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
     private const string PluginDisplayName = "MediaForge Requests";
     private const int TransformationRetries = 30;
     private readonly IApplicationPaths _applicationPaths;
+    private int _transformationRegistered;
+    private int _transformationRegistrationInProgress;
 
     public Plugin(IApplicationPaths applicationPaths, IXmlSerializer xmlSerializer)
         : base(applicationPaths, xmlSerializer)
@@ -34,7 +36,10 @@ public sealed class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
 
         if (Configuration.EnableAllUsers)
         {
-            _ = Task.Run(RegisterWebInjectionAsync);
+            // Make the user entry available immediately. Registering the optional
+            // File Transformation integration still happens in the background so
+            // the injection survives future jellyfin-web file replacements.
+            EnableWebInjection();
         }
         else
         {
@@ -61,29 +66,65 @@ public sealed class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
 
         MigrateLegacySecret(typed);
         base.UpdateConfiguration(typed);
+
+        if (typed.EnableAllUsers)
+        {
+            EnableWebInjection();
+        }
+        else
+        {
+            CleanupInjection();
+        }
     }
 
     private string IndexHtmlPath => Path.Combine(_applicationPaths.WebPath, "index.html");
 
+    private void EnableWebInjection()
+    {
+        UpdateIndexHtml(inject: true);
+        if (Volatile.Read(ref _transformationRegistered) == 0
+            && Interlocked.CompareExchange(ref _transformationRegistrationInProgress, 1, 0) == 0)
+        {
+            _ = Task.Run(RegisterWebInjectionAsync);
+        }
+    }
+
     private async Task RegisterWebInjectionAsync()
     {
-        for (var attempt = 0; attempt < TransformationRetries; attempt++)
+        try
         {
-            await Task.Delay(TimeSpan.FromSeconds(1)).ConfigureAwait(false);
-            try
+            for (var attempt = 0; attempt < TransformationRetries; attempt++)
             {
-                if (TryRegisterFileTransformation())
+                if (Plugin.Instance?.Configuration.EnableAllUsers != true)
                 {
                     return;
                 }
+
+                try
+                {
+                    if (TryRegisterFileTransformation())
+                    {
+                        Volatile.Write(ref _transformationRegistered, 1);
+                        return;
+                    }
+                }
+                catch
+                {
+                    // The other plugin may still be initializing.
+                }
+
+                await Task.Delay(TimeSpan.FromSeconds(1)).ConfigureAwait(false);
             }
-            catch
+
+            if (Plugin.Instance?.Configuration.EnableAllUsers == true)
             {
-                // The other plugin may still be initializing.
+                UpdateIndexHtml(inject: true);
             }
         }
-
-        UpdateIndexHtml(inject: true);
+        finally
+        {
+            Volatile.Write(ref _transformationRegistrationInProgress, 0);
+        }
     }
 
     private bool TryRegisterFileTransformation()
@@ -184,36 +225,38 @@ public sealed class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
     }
 
     public IEnumerable<PluginPageInfo> GetPages()
+        => CreatePages();
+
+    /// <summary>Creates the embedded page registrations in Jellyfin's preferred order.</summary>
+    public static IReadOnlyList<PluginPageInfo> CreatePages()
     {
-        var root = GetType().Namespace;
+        var root = typeof(Plugin).Namespace;
         return
         [
             new PluginPageInfo
             {
-                Name = "MediaForgeRequests",
-                EmbeddedResourcePath = $"{root}.Web.requests.html",
+                Name = "MediaForgeRequestsConfig",
+                EmbeddedResourcePath = $"{root}.Web.config.html",
                 EnableInMainMenu = true,
                 MenuSection = "server",
-                MenuIcon = "download",
+                MenuIcon = "settings",
+                DisplayName = "MediaForge Requests Settings",
+            },
+            new PluginPageInfo
+            {
+                Name = "MediaForgeRequestsConfigJS",
+                EmbeddedResourcePath = $"{root}.Web.config.js",
+            },
+            new PluginPageInfo
+            {
+                Name = "MediaForgeRequests",
+                EmbeddedResourcePath = $"{root}.Web.requests.html",
                 DisplayName = PluginDisplayName,
             },
             new PluginPageInfo
             {
                 Name = "MediaForgeRequestsJS",
                 EmbeddedResourcePath = $"{root}.Web.requests.js",
-            },
-            new PluginPageInfo
-            {
-                Name = "MediaForgeRequestsConfig",
-                EmbeddedResourcePath = $"{root}.Web.config.html",
-                MenuSection = "server",
-                MenuIcon = "settings",
-                DisplayName = PluginDisplayName,
-            },
-            new PluginPageInfo
-            {
-                Name = "MediaForgeRequestsConfigJS",
-                EmbeddedResourcePath = $"{root}.Web.config.js",
             },
         ];
     }

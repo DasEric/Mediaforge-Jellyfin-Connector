@@ -17,6 +17,23 @@ providers, and download settings enabled in MediaForge automatically apply.
 5. Enter the MediaForge URL and the key, which is displayed only once, in the
    Jellyfin plugin settings.
 
+The connector intentionally has no separate page of its own. Its only
+module-specific setting is the **Enable Jellyfin Connector** toggle under
+**Module Manager > Module Settings**. API keys are managed centrally by
+MediaForge under **Settings > API** and are not stored in this module.
+
+If the module card is missing, verify the exact directory layout:
+
+```text
+~/.mediaforge/thirdparties/mediaforge_jellyfin_connector/__init__.py
+~/.mediaforge/thirdparties/mediaforge_jellyfin_connector/routes.py
+```
+
+There must not be a second nested `mediaforge_jellyfin_connector` directory.
+After correcting a manual installation, restart MediaForge or use the Module
+Manager's refresh function. The MediaForge log will report an import or
+compatibility error if registration still fails.
+
 After saving, the key is stored in encrypted form by the Jellyfin plugin and is
 never returned to a browser. The module validates every submitted media URL
 against MediaForge's own provider registry, limits field lengths, and accepts

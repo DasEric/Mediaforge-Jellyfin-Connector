@@ -19,7 +19,7 @@ MODULE_DESCRIPTION_DE = (
 )
 MODULE_AUTHOR = "MediaForge Jellyfin Connector contributors"
 MODULE_ENABLED_DEFAULT = True
-MODULE_VERSION = "0.2.0"
+MODULE_VERSION = "0.2.2"
 MODULE_API_VERSION = 1
 MODULE_MIN_APP_VERSION = "1.5.0"
 MODULE_MAX_APP_VERSION = ""
@@ -55,6 +55,5 @@ def register(app) -> None:
         ),
         badges=[("API", "#00a4dc"), ("Jellyfin", "#8b5cf6")],
         section="system",
-        settings_host="integrations",
-        settings_tab="thirdparty",
+        settings_host="settings",
     )

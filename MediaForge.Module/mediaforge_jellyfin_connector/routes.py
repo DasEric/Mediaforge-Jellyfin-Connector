@@ -128,7 +128,7 @@ def create_blueprint(app, enabled_setting_key: str):
             {
                 "ok": True,
                 "module": "mediaforge_jellyfin_connector",
-                "version": "0.2.0",
+                "version": "0.2.2",
             }
         )
 

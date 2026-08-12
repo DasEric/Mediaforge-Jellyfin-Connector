@@ -5,10 +5,16 @@
   function api() { return typeof ApiClient !== 'undefined' ? ApiClient : window.ApiClient; }
   function inject() {
     if (document.getElementById(MENU_ID)) return;
-    const sidebar = document.querySelector('.mainDrawer-scrollContainer'); if (!sidebar || !api()) return;
+    const sidebar = document.querySelector('.mainDrawer-scrollContainer, .mainDrawer .scrollContainer'); if (!sidebar || !api()) return;
     const entry = document.createElement('a'); entry.id = MENU_ID; entry.href = '#'; entry.setAttribute('is', 'emby-linkbutton'); entry.setAttribute('data-itemid', 'mediaforge-requests'); entry.className = 'navMenuOption lnkMediaFolder'; entry.innerHTML = '<span class="material-icons navMenuOptionIcon playlist_add" aria-hidden="true"></span><span class="navMenuOptionText">Anfragen</span>';
-    entry.addEventListener('click', function (event) { event.preventDefault(); const backdrop = document.querySelector('.mainDrawer-backdrop'); if (backdrop) backdrop.click(); open(); });
-    (sidebar.querySelector('.customMenuOptions') || sidebar).appendChild(entry);
+    entry.addEventListener('click', function (event) { event.preventDefault(); event.stopPropagation(); const backdrop = document.querySelector('.mainDrawer-backdrop'); if (backdrop) backdrop.click(); open(); });
+    const custom = sidebar.querySelector('.customMenuOptions');
+    const libraries = sidebar.querySelector('.libraryMenuOptions');
+    const admin = sidebar.querySelector('.adminMenuOptions');
+    if (custom) custom.appendChild(entry);
+    else if (libraries) sidebar.insertBefore(entry, libraries);
+    else if (admin) sidebar.insertBefore(entry, admin);
+    else sidebar.appendChild(entry);
   }
   async function open() {
     const old = document.getElementById(MODAL_ID); if (old) old.remove();

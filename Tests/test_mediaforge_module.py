@@ -85,6 +85,53 @@ def _load_routes_module():
     return module
 
 
+def _load_connector_package():
+    package_names = (
+        "mediaforge",
+        "mediaforge.web",
+        "mediaforge.web.routes",
+        "mediaforge.web.thirdparties",
+    )
+    for name in package_names:
+        package = types.ModuleType(name)
+        package.__path__ = []
+        sys.modules[name] = package
+
+    registrations = []
+    registry = types.ModuleType("mediaforge.web.thirdparties.registry")
+    registry.module_setting_key = lambda module_id, key: f"module:{module_id}:{key}"
+    registry.register_thirdparty = lambda **kwargs: registrations.append(kwargs)
+    sys.modules[registry.__name__] = registry
+
+    routes = types.ModuleType(
+        "mediaforge.web.thirdparties.mediaforge_jellyfin_connector.routes"
+    )
+    routes.create_blueprint = lambda _app, _key: (object(), {"connector.health": "status:read"})
+    sys.modules[routes.__name__] = routes
+
+    api = types.ModuleType("mediaforge.web.routes.v1_api")
+    api._V1_ENDPOINT_SCOPES = {}
+    sys.modules[api.__name__] = api
+
+    path = (
+        Path(__file__).parents[1]
+        / "MediaForge.Module"
+        / "mediaforge_jellyfin_connector"
+        / "__init__.py"
+    )
+    name = "mediaforge.web.thirdparties.mediaforge_jellyfin_connector"
+    spec = importlib.util.spec_from_file_location(
+        name,
+        path,
+        submodule_search_locations=[str(path.parent)],
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module, registrations, api._V1_ENDPOINT_SCOPES
+
+
 class ConnectorRouteSecurityTests(unittest.TestCase):
     def setUp(self):
         routes = _load_routes_module()
@@ -195,6 +242,28 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
                 headers=headers,
             )
             self.assertEqual(400, response.status_code)
+
+
+class ConnectorRegistrationTests(unittest.TestCase):
+    def test_module_registers_an_explicit_module_settings_card(self):
+        module, registrations, scopes = _load_connector_package()
+
+        class FakeApp:
+            def __init__(self):
+                self.blueprints = []
+
+            def register_blueprint(self, blueprint):
+                self.blueprints.append(blueprint)
+
+        app = FakeApp()
+        module.register(app)
+
+        self.assertEqual(1, len(app.blueprints))
+        self.assertEqual(1, len(registrations))
+        self.assertEqual("mediaforge_jellyfin_connector", registrations[0]["item_id"])
+        self.assertEqual("settings", registrations[0]["settings_host"])
+        self.assertEqual("module:mediaforge_jellyfin_connector:enabled", registrations[0]["enabled_setting_key"])
+        self.assertEqual({"connector.health": "status:read"}, scopes)
 
 
 if __name__ == "__main__":

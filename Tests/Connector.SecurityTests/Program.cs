@@ -1,8 +1,13 @@
 using System.Text;
 using System.Text.Json;
+using Jellyfin.Plugin.MediaForge;
 using Jellyfin.Plugin.MediaForge.Configuration;
+using Jellyfin.Plugin.MediaForge.Api;
+using Jellyfin.Plugin.MediaForge.Helpers;
 using Jellyfin.Plugin.MediaForge.Models;
 using Jellyfin.Plugin.MediaForge.Services;
+using MediaBrowser.Common.Api;
+using Microsoft.AspNetCore.Authorization;
 
 var testRoot = Path.Combine(Path.GetTempPath(), "mediaforge-connector-tests-" + Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(testRoot);
@@ -11,6 +16,9 @@ try
 {
     TestSecretStore(testRoot);
     TestConfigurationSerialization();
+    TestAuthorizationBoundaries();
+    TestPluginPageRegistration();
+    TestWebInjection();
     TestMediaGrants();
     TestRateLimiter();
     await TestRequestStoreAsync(testRoot);
@@ -31,6 +39,90 @@ static void TestConfigurationSerialization()
     var newtonsoftJson = Newtonsoft.Json.JsonConvert.SerializeObject(new PluginConfiguration { MediaForgeApiKey = token });
     Assert(!newtonsoftJson.Contains(token, StringComparison.Ordinal), "Legacy API key was exposed through Newtonsoft JSON configuration.");
     Assert(!newtonsoftJson.Contains("MediaForgeApiKey", StringComparison.Ordinal), "Legacy API key property was exposed through Newtonsoft JSON configuration.");
+}
+
+static void TestWebInjection()
+{
+    const string index = "<html><body><main>Jellyfin</main></body></html>";
+    var enabled = TransformationPatches.ApplyIndexHtml(new PatchRequestPayload { Contents = index }, enabled: true);
+    Assert(enabled.Contains("MediaForgeRequests/InjectionScript", StringComparison.Ordinal), "User navigation script was not injected.");
+    Assert(enabled.IndexOf("MediaForgeRequests/InjectionScript", StringComparison.Ordinal)
+        == enabled.LastIndexOf("MediaForgeRequests/InjectionScript", StringComparison.Ordinal), "User navigation script was injected more than once.");
+
+    var enabledAgain = TransformationPatches.ApplyIndexHtml(new PatchRequestPayload { Contents = enabled }, enabled: true);
+    Assert(enabledAgain == enabled, "Repeated user navigation injection was not idempotent.");
+
+    var disabled = TransformationPatches.ApplyIndexHtml(new PatchRequestPayload { Contents = enabled }, enabled: false);
+    Assert(!disabled.Contains("MediaForgeRequests/InjectionScript", StringComparison.Ordinal), "Disabled user navigation script was not removed.");
+}
+
+static void TestPluginPageRegistration()
+{
+    var pages = Plugin.CreatePages();
+    var menuPages = pages.Where(page => page.EnableInMainMenu).ToArray();
+    Assert(menuPages.Length == 1, "Exactly one plugin page must be exposed in the administrator menu.");
+    Assert(menuPages[0].Name == "MediaForgeRequestsConfig", "Jellyfin does not open the connector settings page by default.");
+    Assert(pages[0].Name == "MediaForgeRequestsConfig", "The settings page must be Jellyfin's first configuration-page candidate.");
+
+    var assembly = typeof(Plugin).Assembly;
+    using var stream = assembly.GetManifestResourceStream("Jellyfin.Plugin.MediaForge.Web.config.html")
+        ?? throw new InvalidOperationException("Embedded settings page is missing.");
+    using var reader = new StreamReader(stream, Encoding.UTF8);
+    var html = reader.ReadToEnd();
+    Assert(
+        html.Contains("data-controller=\"__plugin/MediaForgeRequestsConfigJS\"", StringComparison.Ordinal),
+        "The settings page does not load its controller script.");
+    Assert(html.Contains("id=\"mfApiKey\"", StringComparison.Ordinal), "The MediaForge API-key input is missing from settings.");
+}
+
+static void TestAuthorizationBoundaries()
+{
+    var controller = typeof(MediaForgeRequestsController);
+    Assert(
+        controller.GetCustomAttributes(typeof(AuthorizeAttribute), inherit: true).Length > 0,
+        "The requests controller must require an authenticated Jellyfin user.");
+
+    var userMethods = new[]
+    {
+        nameof(MediaForgeRequestsController.GetStatus),
+        nameof(MediaForgeRequestsController.GetSources),
+        nameof(MediaForgeRequestsController.Search),
+        nameof(MediaForgeRequestsController.GetSeries),
+        nameof(MediaForgeRequestsController.GetSeasons),
+        nameof(MediaForgeRequestsController.GetEpisodes),
+        nameof(MediaForgeRequestsController.GetProviders),
+        nameof(MediaForgeRequestsController.GetMyRequests),
+        nameof(MediaForgeRequestsController.GetMyProgress),
+        nameof(MediaForgeRequestsController.WithdrawRequest),
+        nameof(MediaForgeRequestsController.CreateRequest),
+    };
+    foreach (var methodName in userMethods)
+    {
+        var method = controller.GetMethod(methodName) ?? throw new InvalidOperationException($"Missing user endpoint {methodName}.");
+        var policies = method.GetCustomAttributes(typeof(AuthorizeAttribute), inherit: true)
+            .Cast<AuthorizeAttribute>()
+            .Select(attribute => attribute.Policy);
+        Assert(!policies.Contains(Policies.RequiresElevation), $"User endpoint {methodName} unexpectedly requires administrator elevation.");
+    }
+
+    var adminMethods = new[]
+    {
+        nameof(MediaForgeRequestsController.GetAllRequests),
+        nameof(MediaForgeRequestsController.Approve),
+        nameof(MediaForgeRequestsController.Reject),
+        nameof(MediaForgeRequestsController.GetApiKeyStatus),
+        nameof(MediaForgeRequestsController.UpdateApiKey),
+        nameof(MediaForgeRequestsController.DeleteApiKey),
+        nameof(MediaForgeRequestsController.TestConnection),
+    };
+    foreach (var methodName in adminMethods)
+    {
+        var method = controller.GetMethod(methodName) ?? throw new InvalidOperationException($"Missing admin endpoint {methodName}.");
+        var policies = method.GetCustomAttributes(typeof(AuthorizeAttribute), inherit: true)
+            .Cast<AuthorizeAttribute>()
+            .Select(attribute => attribute.Policy);
+        Assert(policies.Contains(Policies.RequiresElevation), $"Admin endpoint {methodName} is missing the elevation policy.");
+    }
 }
 
 static void TestSecretStore(string testRoot)

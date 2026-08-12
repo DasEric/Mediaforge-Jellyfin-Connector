@@ -63,6 +63,12 @@ Copy the `MediaForge.Module/mediaforge_jellyfin_connector` directory to
 MediaForge. In **Module Manager > Module Settings**, confirm that
 **Jellyfin Connector** is enabled.
 
+The connector does not need a separate settings page in MediaForge. Its only
+module-specific setting is the enable toggle. The API key is created centrally
+under **Settings > API**. If the module card is missing, verify that
+`~/.mediaforge/thirdparties/mediaforge_jellyfin_connector/__init__.py` exists
+directly and that the module directory is not nested twice.
+
 In MediaForge, open **Settings > API** and create a new scoped key with these
 permissions:
 
@@ -86,7 +92,9 @@ URL:  https://YOUR-GITHUB-USERNAME.github.io/YOUR-REPOSITORY/manifest.json
 ```
 
 Install **MediaForge Requests** from the catalog and restart Jellyfin. Then
-open **Dashboard > Plugins > MediaForge Requests** and configure:
+open **Dashboard > Plugins > My Plugins > MediaForge Requests > Settings**.
+The page title must be **MediaForge Requests Settings** and includes the
+password field **MediaForge API-Key**. Configure:
 
 - MediaForge URL
 - API key
@@ -105,11 +113,11 @@ configuration.
 
 ### 3. Make the page visible to regular users
 
-**Show in the sidebar for all Jellyfin users** is enabled by default. Restart
-Jellyfin after changing this setting. If the Jellyfin **File Transformation**
-plugin is installed, its runtime patch is used. Otherwise, this plugin modifies
-Jellyfin's `index.html` as a fallback. Another server restart may therefore be
-required after a Jellyfin Web update.
+**Show in the sidebar for all Jellyfin users** is enabled by default. Reload
+already open Jellyfin Web clients after changing this setting. If the Jellyfin
+**File Transformation** plugin is installed, its runtime patch is used.
+Otherwise, this plugin modifies Jellyfin's `index.html` as a fallback. Another
+server restart may therefore be required after a Jellyfin Web update.
 
 The **Requests** item is added to the custom section of the hamburger menu and
 is therefore available to all signed-in users. An observer adds it again if
@@ -133,11 +141,11 @@ One-time setup:
    tags**, keep **Selected branches and tags** and add a tag rule named `v*`.
    This allows version tags to deploy the repository feed without permitting
    arbitrary refs.
-4. Publish version `0.2.0`:
+4. Publish version `0.2.2`:
 
 ```powershell
-git tag -s v0.2.0 -m "MediaForge Requests 0.2.0"
-git push origin v0.2.0
+git tag -s v0.2.2 -m "MediaForge Requests 0.2.2"
+git push origin v0.2.2
 ```
 
 After the workflow completes successfully, the Jellyfin feed is available at:
@@ -150,11 +158,11 @@ For a later update, update all version references atomically, review the
 changelog, and push the matching tag:
 
 ```powershell
-.\scripts\set-version.ps1 -Version 0.2.1
+.\scripts\set-version.ps1 -Version 0.2.3
 git add .
-git commit -m "Release 0.2.1"
-git tag -s v0.2.1 -m "MediaForge Requests 0.2.1"
-git push origin main v0.2.1
+git commit -m "Release 0.2.3"
+git tag -s v0.2.3 -m "MediaForge Requests 0.2.3"
+git push origin main v0.2.3
 ```
 
 Jellyfin recognizes the newer version during its next plugin update check by
@@ -166,7 +174,7 @@ directory, but Jellyfin's plugin updater cannot install that module in
 MediaForge.
 
 The Jellyfin plugin can also be installed manually. Extract
-`dist/MediaForgeRequests_0.2.0.zip` to
+`dist/MediaForgeRequests_0.2.2.zip` to
 `/var/lib/jellyfin/plugins/MediaForgeRequests/`. The destination directory must
 contain `Jellyfin.Plugin.MediaForge.dll` and `meta.json`.
 
@@ -185,8 +193,8 @@ If `dotnet` is not available through `PATH`:
 The build creates:
 
 - `dist/Jellyfin.Plugin.MediaForge.dll`
-- `dist/MediaForgeRequests_0.2.0.zip`
-- `dist/mediaforge_jellyfin_connector_0.2.0.zip`
+- `dist/MediaForgeRequests_0.2.2.zip`
+- `dist/mediaforge_jellyfin_connector_0.2.2.zip`
 - `dist/SHA256SUMS.txt`
 
 ## Security and operation
