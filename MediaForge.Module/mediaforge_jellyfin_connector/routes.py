@@ -26,6 +26,40 @@ _QUEUE_STATES = {"queued", "running", "completed", "partial", "failed", "cancell
 _PROGRESS_PHASES = {"download", "ffmpeg", "upscaling", "move"}
 
 
+def _without_mediaforge_session_login(view):
+    """Remove only MediaForge's own ``login_required`` wrapper.
+
+    During normal startup third-party modules are registered before the
+    blanket session-auth pass, so the internal handlers captured below are
+    raw views.  During a live module install/refresh those handlers have
+    already been wrapped.  Jellyfin is a machine client and has no MediaForge
+    browser session; the connector supplies the replacement security boundary
+    through its scoped API-key guard.
+
+    Compare code objects produced by MediaForge's decorator instead of blindly
+    following every ``__wrapped__`` link.  This deliberately leaves admin,
+    age-gate, and any future unrelated security decorators intact.
+    """
+    from ...auth import login_required
+
+    def probe():
+        pass
+
+    login_wrapper_code = login_required(probe).__code__
+    candidate = view
+    visited = set()
+    while (
+        id(candidate) not in visited
+        and getattr(candidate, "__code__", None) is login_wrapper_code
+    ):
+        visited.add(id(candidate))
+        wrapped = getattr(candidate, "__wrapped__", None)
+        if wrapped is None:
+            break
+        candidate = wrapped
+    return candidate
+
+
 def _safe_text(value, maximum: int) -> bool:
     return (
         isinstance(value, str)
@@ -110,7 +144,10 @@ def create_blueprint(app, enabled_setting_key: str):
             "missing routes: " + ", ".join(missing)
         )
 
-    internal = {key: app.view_functions[name] for key, name in _ROUTE_NAMES.items()}
+    internal = {
+        key: _without_mediaforge_session_login(app.view_functions[name])
+        for key, name in _ROUTE_NAMES.items()
+    }
 
     bp = Blueprint("mediaforge_jellyfin_connector", __name__)
 
@@ -128,7 +165,7 @@ def create_blueprint(app, enabled_setting_key: str):
             {
                 "ok": True,
                 "module": "mediaforge_jellyfin_connector",
-                "version": "0.2.3",
+                "version": "0.2.4",
             }
         )
 

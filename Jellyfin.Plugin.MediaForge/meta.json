@@ -1,6 +1,6 @@
 {
   "category": "General",
-  "changelog": "v0.2.3\n- Fixed API-key-only connector access when MediaForge session authentication is enabled\n- Added a regression test proving Jellyfin does not need a MediaForge browser session\n- Kept missing or invalid scoped API keys denied with HTTP 401\n\nv0.2.2\n- Fixed access to MediaForge URL and API-key settings\n- Made the settings page Jellyfin's default plugin page\n- Explicitly registered the MediaForge module under Module Settings\n- Added configuration-page regression tests\n\nv0.2.1\n- Fixed the Requests sidebar entry for all signed-in users\n- Applied sidebar setting changes immediately\n- Added compatibility for current Jellyfin drawer layouts\n- Added authorization and injection regression tests\n\nv0.2.0\n- Added Jellyfin repository and automatic updates\n- Added user-visible download progress\n- Added pending-request withdrawal\n- Added security and concurrency hardening",
+  "changelog": "v0.2.4\n- Fixed source and search calls after a live MediaForge module installation or refresh\n- Removed only MediaForge's session-login wrapper from captured internal handlers\n- Kept scoped API-key checks and unrelated security wrappers intact\n- Added regression coverage for nested session wrappers\n\nv0.2.3\n- Fixed API-key-only connector access when MediaForge session authentication is enabled\n- Added a regression test proving Jellyfin does not need a MediaForge browser session\n- Kept missing or invalid scoped API keys denied with HTTP 401\n\nv0.2.2\n- Fixed access to MediaForge URL and API-key settings\n- Made the settings page Jellyfin's default plugin page\n- Explicitly registered the MediaForge module under Module Settings\n- Added configuration-page regression tests\n\nv0.2.1\n- Fixed the Requests sidebar entry for all signed-in users\n- Applied sidebar setting changes immediately\n- Added compatibility for current Jellyfin drawer layouts\n- Added authorization and injection regression tests\n\nv0.2.0\n- Added Jellyfin repository and automatic updates\n- Added user-visible download progress\n- Added pending-request withdrawal\n- Added security and concurrency hardening",
   "description": "Searches the movie and TV sources enabled in MediaForge directly from Jellyfin. Users can request downloads; administrators can approve them or enable automatic mode.",
   "guid": "2ea7f67d-8e4d-4c84-bd5a-a5bcd713bb23",
   "name": "MediaForge Requests",
@@ -8,7 +8,7 @@
   "owner": "MediaForge Jellyfin Connector contributors",
   "targetAbi": "10.11.0.0",
   "timestamp": "2026-08-12T00:00:00Z",
-  "version": "0.2.3.0",
+  "version": "0.2.4.0",
   "status": "Active",
   "autoUpdate": true
 }

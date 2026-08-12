@@ -12,6 +12,16 @@ from pathlib import Path
 from flask import Flask, jsonify, request
 
 
+def _mediaforge_login_required(view):
+    @wraps(view)
+    def decorated(*args, **kwargs):
+        if request.headers.get("X-Test-Web-Session") != "present":
+            return jsonify({"error": "authentication required"}), 401
+        return view(*args, **kwargs)
+
+    return decorated
+
+
 def _load_routes_module():
     package_names = (
         "mediaforge",
@@ -58,6 +68,10 @@ def _load_routes_module():
 
     api._check_api_key = check_api_key
     sys.modules[api.__name__] = api
+
+    auth = types.ModuleType("mediaforge.web.auth")
+    auth.login_required = _mediaforge_login_required
+    sys.modules[auth.__name__] = auth
 
     providers = types.ModuleType("mediaforge.providers")
 
@@ -142,7 +156,7 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
             self.app.add_url_rule(
                 f"/internal/{endpoint}",
                 endpoint=endpoint,
-                view_func=self._internal(endpoint),
+                view_func=_mediaforge_login_required(self._internal(endpoint)),
                 methods=["GET", "POST"],
             )
         blueprint, _scopes = routes.create_blueprint(self.app, "connector_enabled")
@@ -153,14 +167,7 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
         # every connector view must still enforce its own scoped key.
         for endpoint in _scopes:
             original = self.app.view_functions[endpoint]
-
-            @wraps(original)
-            def session_login_required(*args, __original=original, **kwargs):
-                if request.headers.get("X-Test-Web-Session") != "present":
-                    return jsonify({"error": "authentication required"}), 401
-                return __original(*args, **kwargs)
-
-            self.app.view_functions[endpoint] = session_login_required
+            self.app.view_functions[endpoint] = _mediaforge_login_required(original)
         self.client = self.app.test_client()
 
     def _internal(self, endpoint):
