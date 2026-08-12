@@ -36,6 +36,33 @@ public sealed class CreateMediaRequest
     public bool Upscale { get; set; }
 }
 
+/// <summary>Payload for a server-calculated request containing only missing media.</summary>
+public sealed class AutomaticMediaRequest
+{
+    [Required]
+    [MaxLength(300)]
+    public string Title { get; set; } = string.Empty;
+
+    [Required]
+    [MaxLength(2048)]
+    public string SeriesUrl { get; set; } = string.Empty;
+
+    [Required]
+    [MaxLength(80)]
+    public string Source { get; set; } = string.Empty;
+
+    [MaxLength(20)]
+    public string MediaType { get; set; } = "series";
+
+    [MaxLength(100)]
+    public string Language { get; set; } = string.Empty;
+
+    [MaxLength(100)]
+    public string Provider { get; set; } = string.Empty;
+
+    public bool Upscale { get; set; }
+}
+
 /// <summary>Optional rejection reason supplied by an administrator.</summary>
 public sealed class RejectMediaRequest
 {

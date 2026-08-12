@@ -3,7 +3,7 @@ export default function (view, params) {
   view.dataset.mfInitialized = '1';
   const api = typeof ApiClient !== 'undefined' ? ApiClient : window.ApiClient;
   const q = (name) => view.querySelector('[data-mf="' + name + '"]');
-  const state = { status: {}, detail: null, seasons: [], loaded: new Map(), source: '', tab: 'search' };
+  const state = { status: {}, detail: null, source: '', tab: 'search' };
   let mineTimer = null;
   let mineLoading = false;
 
@@ -89,8 +89,15 @@ export default function (view, params) {
     } catch (_) { /* normal users receive 403 */ }
   }
 
+  function syncSearchMode() {
+    const searching = q('query').value.trim().length > 0;
+    q('discover').hidden = searching;
+    q('results').hidden = !searching;
+    if (!searching) q('results').innerHTML = '';
+  }
+  q('query').addEventListener('input', syncSearchMode);
   q('search-form').addEventListener('submit', async (event) => {
-    event.preventDefault(); notice(''); q('results').innerHTML = '<div class="mf-empty">Suche läuft…</div>';
+    event.preventDefault(); syncSearchMode(); notice(''); q('results').innerHTML = '<div class="mf-empty">Suche läuft…</div>';
     try {
       const data = await call('Search', { query: { query: q('query').value.trim(), source: q('source').value } });
       renderResults(data.groups || []);
@@ -111,9 +118,16 @@ export default function (view, params) {
 
   function createMediaCard(item, sourceId, sourceLabel) {
     const card = document.createElement('article'); card.className = 'mf-card'; card.tabIndex = 0;
+    const rawUrl = item.url || item.link || item.series_url;
     if (item.poster_url) {
       const cover = document.createElement('img'); cover.className = 'mf-cover'; cover.loading = 'lazy'; cover.alt = '';
       card.appendChild(cover); loadCover(cover, item.poster_url);
+    } else if (rawUrl) {
+      const cover = document.createElement('img'); cover.className = 'mf-cover'; cover.loading = 'lazy'; cover.alt = '';
+      card.appendChild(cover);
+      call('Series', { query: { url: rawUrl } })
+        .then((detail) => detail.poster_url ? loadCover(cover, detail.poster_url) : cover.remove())
+        .catch(() => cover.remove());
     }
     const body = document.createElement('div'); body.className = 'mf-cardbody';
     const title = document.createElement('div'); title.className = 'mf-cardtitle'; title.textContent = item.title || item.name || 'Unbekannter Titel';
@@ -142,55 +156,44 @@ export default function (view, params) {
   async function openDetail(item, source) {
     const rawUrl = item.url || item.link || item.series_url;
     if (!rawUrl) return notice('Der Treffer enthält keine MediaForge-URL.', true);
-    state.source = source; state.loaded.clear(); state.seasons = []; q('overlay').style.display = 'flex'; q('detail-title').textContent = item.title || item.name || 'Laden…'; q('description').textContent = 'Details werden geladen…'; q('seasons').innerHTML = '';
+    state.source = source; state.detail = null; q('overlay').style.display = 'flex'; q('detail-title').textContent = item.title || item.name || 'Laden…'; q('description').textContent = 'Vorhandene Staffeln und Episoden werden geprüft…'; q('plan').innerHTML = '<div class="mf-empty">MediaForge prüft den Bestand…</div>'; q('request').disabled = true;
     setOptions(q('language'), [state.status.defaultLanguage || 'German Dub'], state.status.defaultLanguage);
     setOptions(q('provider'), [state.status.defaultProvider || 'VOE'], state.status.defaultProvider);
     try {
-      const [detail, seasons] = await Promise.all([call('Series', { query: { url: rawUrl } }), call('Seasons', { query: { url: rawUrl } })]);
-      state.detail = Object.assign({}, item, detail, { url: detail.url || rawUrl, is_movie: detail.is_movie === true || item.media_type === 'movie' }); state.seasons = seasons.seasons || [];
-      q('detail-title').textContent = state.detail.title || item.title || item.name || 'Unbekannter Titel'; q('description').textContent = state.detail.description || 'Keine Beschreibung verfügbar.';
-      renderSeasons(); if (state.seasons.length === 1 && state.seasons[0].is_single_movie) await loadSeason(0);
-    } catch (error) { q('description').textContent = error.message; }
+      const payload = { title: item.title || item.name || 'Unbekannter Titel', seriesUrl: rawUrl, source, mediaType: item.media_type === 'movie' ? 'movie' : 'series' };
+      const plan = await call('Requests/Plan', { method: 'POST', body: payload });
+      state.detail = Object.assign(payload, { title: plan.title || payload.title, plan });
+      q('detail-title').textContent = state.detail.title;
+      q('description').textContent = plan.description || 'Keine Beschreibung verfügbar.';
+      const languages = Array.isArray(plan.languages) && plan.languages.length ? plan.languages : [state.status.defaultLanguage || 'German Dub'];
+      setOptions(q('language'), languages, state.status.defaultLanguage);
+      const syncProviders = () => {
+        const available = plan.providers && Array.isArray(plan.providers[q('language').value]) ? plan.providers[q('language').value] : [];
+        setOptions(q('provider'), available.length ? available : [state.status.defaultProvider || 'VOE'], state.status.defaultProvider);
+      };
+      q('language').onchange = syncProviders; syncProviders();
+      q('plan').innerHTML = '';
+      const summary = document.createElement('div'); summary.className = 'mf-plan ' + (plan.missing_count ? '' : 'complete');
+      if (plan.missing_count) {
+        summary.textContent = plan.is_movie
+          ? 'Der Film fehlt und kann angefragt werden.'
+          : plan.missing_count + ' von ' + plan.total_count + ' Episoden fehlen. Es werden ausschließlich diese fehlenden Episoden angefragt.';
+        q('request').disabled = false;
+      } else {
+        summary.textContent = plan.is_movie
+          ? 'Der Film ist bereits vorhanden und wird nicht erneut eingereiht.'
+          : 'Alle ' + plan.total_count + ' Episoden sind bereits vorhanden. Es wird nichts eingereiht.';
+      }
+      q('plan').appendChild(summary);
+    } catch (error) { q('description').textContent = error.message; q('plan').innerHTML = ''; }
   }
-  function renderSeasons() {
-    const host = q('seasons'); host.innerHTML = '';
-    state.seasons.forEach((season, index) => {
-      const row = document.createElement('section'); row.className = 'mf-season'; row.dataset.index = index;
-      const head = document.createElement('div'); head.className = 'mf-seasonhead';
-      const label = document.createElement('strong'); label.textContent = season.is_single_movie ? 'Film' : (season.are_movies ? 'Filme/Specials' : 'Staffel ' + season.season_number) + ' (' + (season.episode_count || '?') + ')';
-      const button = document.createElement('button'); button.type = 'button'; button.className = 'mf-btn secondary'; button.textContent = 'Episoden laden'; button.addEventListener('click', () => loadSeason(index)); head.append(label, button);
-      const episodes = document.createElement('div'); episodes.className = 'mf-episodes'; episodes.dataset.episodes = index; row.append(head, episodes); host.appendChild(row);
-    });
-  }
-  async function loadSeason(index) {
-    if (state.loaded.has(index)) return;
-    const host = q('seasons').querySelector('[data-episodes="' + index + '"]'); host.textContent = 'Laden…';
-    try {
-      const data = await call('Episodes', { query: { url: state.seasons[index].url } }); const episodes = data.episodes || []; state.loaded.set(index, episodes); host.innerHTML = '';
-      episodes.forEach((ep) => { const label = document.createElement('label'); label.className = 'mf-episode'; const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = !ep.downloaded; cb.value = ep.url; const text = document.createElement('span'); text.textContent = (state.seasons[index].is_single_movie ? '' : 'E' + ep.episode_number + ' · ') + (ep.title_de || ep.title_en || 'Episode') + (ep.downloaded ? ' ✓ vorhanden' : ''); label.append(cb, text); host.appendChild(label); });
-      updateOptionsFromEpisodes(); const first = episodes.find((ep) => ep.url); if (first) updateProviders(first.url);
-    } catch (error) { host.textContent = error.message; }
-  }
-  function updateOptionsFromEpisodes() {
-    const langs = new Set(); state.loaded.forEach((eps) => eps.forEach((ep) => (ep.languages || []).forEach((lang) => langs.add(lang))));
-    if (langs.size) setOptions(q('language'), Array.from(langs), q('language').value || state.status.defaultLanguage);
-  }
-  async function updateProviders(episodeUrl) {
-    try {
-      const data = await call('Providers', { query: { url: episodeUrl } }); const matrix = data.providers || {}; const languages = Object.keys(matrix);
-      if (languages.length) { setOptions(q('language'), languages, q('language').value || state.status.defaultLanguage); syncProviders(matrix); q('language').onchange = () => syncProviders(matrix); }
-    } catch (_) { /* configured defaults remain available */ }
-  }
-  function syncProviders(matrix) { const providers = matrix[q('language').value] || []; if (providers.length) setOptions(q('provider'), providers, state.status.defaultProvider); }
   function setOptions(select, values, preferred) { const clean = Array.from(new Set(values.filter(Boolean))); select.innerHTML = ''; clean.forEach((value) => { const option = document.createElement('option'); option.value = value; option.textContent = value; select.appendChild(option); }); if (clean.includes(preferred)) select.value = preferred; }
-  q('load-all').addEventListener('click', async () => { q('load-all').disabled = true; try { for (let i = 0; i < state.seasons.length; i++) await loadSeason(i); } finally { q('load-all').disabled = false; } });
-  q('select-all').addEventListener('click', () => q('seasons').querySelectorAll('input[type="checkbox"]').forEach((box) => { box.checked = true; }));
   q('request').addEventListener('click', async () => {
-    const episodes = Array.from(q('seasons').querySelectorAll('input[type="checkbox"]:checked')).map((box) => box.value); if (!episodes.length) return notice('Bitte mindestens eine Episode oder den Film auswählen.', true);
+    if (!state.detail || !state.detail.plan || !state.detail.plan.missing_count) return;
     q('request').disabled = true;
     try {
-      const payload = { title: q('detail-title').textContent, seriesUrl: state.detail.url, source: state.source, mediaType: state.detail.is_movie ? 'movie' : 'series', selectionLabel: episodes.length + (episodes.length === 1 ? ' Episode' : ' Episoden'), episodes, language: q('language').value, provider: q('provider').value, upscale: q('upscale').checked };
-      const result = await call('Requests', { method: 'POST', body: payload }); closeDetail(); notice(result.status === 'queued' ? 'Download wurde direkt an MediaForge übergeben.' : 'Anfrage wurde an den Administrator gesendet.'); switchTab('mine');
+      const payload = { title: state.detail.title, seriesUrl: state.detail.seriesUrl, source: state.detail.source, mediaType: state.detail.plan.is_movie ? 'movie' : 'series', language: q('language').value, provider: q('provider').value, upscale: q('upscale').checked };
+      const result = await call('Requests/Automatic', { method: 'POST', body: payload }); closeDetail(); notice(result.status === 'queued' ? 'Nur die fehlenden Inhalte wurden direkt an MediaForge übergeben.' : 'Die Anfrage für die fehlenden Inhalte wurde an den Administrator gesendet.'); switchTab('mine');
     } catch (error) { notice(error.message, true); } finally { q('request').disabled = false; }
   });
   function closeDetail() { q('overlay').style.display = 'none'; }

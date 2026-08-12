@@ -86,6 +86,8 @@ static void TestRequestPageContract()
     using var scriptReader = new StreamReader(scriptStream, Encoding.UTF8);
     var script = scriptReader.ReadToEnd();
     Assert(script.Contains("call('Discover')", StringComparison.Ordinal), "The Requests page does not load MediaForge discovery rows.");
+    Assert(script.Contains("call('Requests/Automatic'", StringComparison.Ordinal), "The Requests page does not use server-calculated missing-media requests.");
+    Assert(script.Contains("q('discover').hidden = searching", StringComparison.Ordinal), "Search results do not hide the discovery feed.");
     Assert(script.Contains("URL.createObjectURL", StringComparison.Ordinal), "Poster images are not loaded through authenticated blobs.");
     Assert(!script.Contains("accessToken()", StringComparison.Ordinal), "The Requests page must not embed the Jellyfin token in image URLs.");
     Assert(!script.Contains("api_key", StringComparison.OrdinalIgnoreCase), "The Requests page must not put API keys in URLs.");
@@ -115,6 +117,8 @@ static void TestAuthorizationBoundaries()
         nameof(MediaForgeRequestsController.GetSeasons),
         nameof(MediaForgeRequestsController.GetEpisodes),
         nameof(MediaForgeRequestsController.GetProviders),
+        nameof(MediaForgeRequestsController.PlanRequest),
+        nameof(MediaForgeRequestsController.CreateAutomaticRequest),
         nameof(MediaForgeRequestsController.GetMyRequests),
         nameof(MediaForgeRequestsController.GetMyProgress),
         nameof(MediaForgeRequestsController.WithdrawRequest),
@@ -151,6 +155,27 @@ static void TestAuthorizationBoundaries()
 
 static void TestApiJsonContracts()
 {
+    var requestJson = JsonSerializer.Serialize(new MediaRequest
+    {
+        Id = 7,
+        Username = "User",
+        Title = "Title",
+        SelectionLabel = "1 fehlende Episode",
+        EpisodesJson = "[\"https://example.invalid/episode/1\"]",
+        Language = "German Dub",
+        Status = RequestStatuses.Pending,
+        CreatedUtc = DateTime.UnixEpoch,
+    });
+    using (var requestDocument = JsonDocument.Parse(requestJson))
+    {
+        var root = requestDocument.RootElement;
+        foreach (var name in new[] { "id", "username", "title", "selectionLabel", "episodes", "language", "status", "createdUtc" })
+        {
+            Assert(root.TryGetProperty(name, out _), $"MediaRequest is missing the explicit JSON field {name}.");
+        }
+        Assert(!root.TryGetProperty("Title", out _), "MediaRequest leaked an unexpected PascalCase response field.");
+    }
+
     AssertJsonNames("SourceInfo", new Dictionary<string, string>
     {
         ["Id"] = "id",

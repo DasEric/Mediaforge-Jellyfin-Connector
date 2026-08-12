@@ -219,6 +219,143 @@ public sealed class MediaForgeRequestsController : ControllerBase
     public Task<IActionResult> GetProviders([Required] string url, CancellationToken cancellationToken)
         => ProxyGranted(url, token => _mediaForge.GetProvidersAsync(url, token), cancellationToken);
 
+    [HttpPost("Requests/Plan")]
+    [Consumes(MediaTypeNames.Application.Json)]
+    public async Task<IActionResult> PlanRequest(
+        [FromBody] AutomaticMediaRequest request,
+        CancellationToken cancellationToken)
+    {
+        Normalize(request);
+        var validationError = ValidateAutomaticRequest(request, requireOptions: false);
+        if (validationError is not null)
+        {
+            return BadRequest(new { error = validationError });
+        }
+
+        var (userId, _) = CurrentUser();
+        if (!Allow(userId, "plan", 12))
+        {
+            return RateLimitExceeded();
+        }
+
+        try
+        {
+            if (!await SourceIsAllowedAsync(request.Source, cancellationToken).ConfigureAwait(false))
+            {
+                return BadRequest(new { error = "Die angegebene MediaForge-Quelle ist nicht freigegeben oder deaktiviert." });
+            }
+
+            var plan = await BuildMissingPlanAsync(userId, request, cancellationToken).ConfigureAwait(false);
+            return Ok(plan.ToResponse());
+        }
+        catch (MediaForgeException exception)
+        {
+            return MediaForgeError(exception);
+        }
+    }
+
+    [HttpPost("Requests/Automatic")]
+    [Consumes(MediaTypeNames.Application.Json)]
+    public async Task<IActionResult> CreateAutomaticRequest(
+        [FromBody] AutomaticMediaRequest request,
+        CancellationToken cancellationToken)
+    {
+        Normalize(request);
+        var validationError = ValidateAutomaticRequest(request, requireOptions: true);
+        if (validationError is not null)
+        {
+            return BadRequest(new { error = validationError });
+        }
+
+        var config = Plugin.Instance?.Configuration;
+        if (config?.MaintenanceMode == true)
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+            {
+                error = string.IsNullOrWhiteSpace(config.MaintenanceMessage)
+                    ? "Anfragen sind derzeit deaktiviert."
+                    : config.MaintenanceMessage,
+            });
+        }
+
+        var (userId, username) = CurrentUser();
+        if (!Allow(userId, "request", 10))
+        {
+            return RateLimitExceeded();
+        }
+
+        MissingMediaPlan plan;
+        try
+        {
+            if (!await SourceIsAllowedAsync(request.Source, cancellationToken).ConfigureAwait(false))
+            {
+                return BadRequest(new { error = "Die angegebene MediaForge-Quelle ist nicht freigegeben oder deaktiviert." });
+            }
+
+            plan = await BuildMissingPlanAsync(userId, request, cancellationToken).ConfigureAwait(false);
+        }
+        catch (MediaForgeException exception)
+        {
+            return MediaForgeError(exception);
+        }
+
+        if (plan.MissingUrls.Count == 0)
+        {
+            return Conflict(new
+            {
+                error = plan.IsMovie
+                    ? "Der Film ist bereits vollständig vorhanden."
+                    : "Alle verfügbaren Staffeln und Episoden sind bereits vorhanden.",
+                alreadyAvailable = true,
+            });
+        }
+
+        var calculated = new CreateMediaRequest
+        {
+            Title = plan.Title,
+            SeriesUrl = request.SeriesUrl,
+            Source = request.Source,
+            MediaType = plan.IsMovie ? "movie" : "series",
+            SelectionLabel = plan.SelectionLabel,
+            Episodes = plan.MissingUrls.ToList(),
+            Language = request.Language,
+            Provider = request.Provider,
+            Upscale = request.Upscale,
+        };
+        var maxPending = Math.Clamp(config?.MaxPendingRequestsPerUser ?? 10, 1, 100);
+        var addResult = await _store.TryAddAsync(
+            userId,
+            username,
+            calculated,
+            RequestStatuses.Pending,
+            maxPending,
+            cancellationToken).ConfigureAwait(false);
+        if (addResult.Duplicate is not null)
+        {
+            return Conflict(new { error = "Diese fehlenden Inhalte wurden bereits angefragt.", request = addResult.Duplicate });
+        }
+
+        if (addResult.LimitReached)
+        {
+            return StatusCode(StatusCodes.Status429TooManyRequests, new
+            {
+                error = $"Du kannst höchstens {maxPending} offene Anfragen gleichzeitig haben.",
+            });
+        }
+
+        var stored = addResult.Request
+            ?? throw new InvalidOperationException("Request store returned no result.");
+        if (config?.AutoApproveRequests != true)
+        {
+            return Accepted(stored);
+        }
+
+        var queued = await QueueRequestAsync(stored.Id, "automatic", cancellationToken).ConfigureAwait(false);
+        return queued.Status == RequestStatuses.Queued
+            ? Ok(queued)
+            : StatusCode(StatusCodes.Status502BadGateway, queued);
+    }
+
     [HttpGet("Requests/Mine")]
     public async Task<IActionResult> GetMyRequests(CancellationToken cancellationToken)
     {
@@ -324,13 +461,40 @@ public sealed class MediaForgeRequestsController : ControllerBase
             return MediaForgeError(exception);
         }
 
-        if (!_grants.AreGranted(userId, request.Source, request.Episodes.Prepend(request.SeriesUrl)))
+        MissingMediaPlan plan;
+        try
         {
-            return BadRequest(new
+            plan = await BuildMissingPlanAsync(
+                userId,
+                new AutomaticMediaRequest
+                {
+                    Title = request.Title,
+                    SeriesUrl = request.SeriesUrl,
+                    Source = request.Source,
+                    MediaType = request.MediaType,
+                },
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (MediaForgeException exception)
+        {
+            return MediaForgeError(exception);
+        }
+
+        if (plan.MissingUrls.Count == 0)
+        {
+            return Conflict(new
             {
-                error = "Die Medienauswahl ist nicht mehr gültig. Bitte die Suche erneut öffnen und die Auswahl neu laden.",
+                error = plan.IsMovie
+                    ? "Der Film ist bereits vollständig vorhanden."
+                    : "Alle verfügbaren Staffeln und Episoden sind bereits vorhanden.",
+                alreadyAvailable = true,
             });
         }
+
+        request.Title = plan.Title;
+        request.MediaType = plan.IsMovie ? "movie" : "series";
+        request.SelectionLabel = plan.SelectionLabel;
+        request.Episodes = plan.MissingUrls.ToList();
 
         var maxPending = Math.Clamp(config?.MaxPendingRequestsPerUser ?? 10, 1, 100);
         var addResult = await _store.TryAddAsync(
@@ -617,6 +781,236 @@ public sealed class MediaForgeRequestsController : ControllerBase
         request.Episodes = request.Episodes?.Select(url => url?.Trim() ?? string.Empty).ToList() ?? [];
     }
 
+    private static void Normalize(AutomaticMediaRequest request)
+    {
+        request.Title = request.Title?.Trim() ?? string.Empty;
+        request.SeriesUrl = request.SeriesUrl?.Trim() ?? string.Empty;
+        request.Source = request.Source?.Trim().ToLowerInvariant() ?? string.Empty;
+        request.MediaType = request.MediaType?.Trim().ToLowerInvariant() == "movie" ? "movie" : "series";
+        request.Language = request.Language?.Trim() ?? string.Empty;
+        request.Provider = request.Provider?.Trim() ?? string.Empty;
+    }
+
+    private static string? ValidateAutomaticRequest(AutomaticMediaRequest request, bool requireOptions)
+    {
+        if (string.IsNullOrWhiteSpace(request.Title)
+            || string.IsNullOrWhiteSpace(request.SeriesUrl)
+            || string.IsNullOrWhiteSpace(request.Source)
+            || (requireOptions && (string.IsNullOrWhiteSpace(request.Language) || string.IsNullOrWhiteSpace(request.Provider))))
+        {
+            return requireOptions
+                ? "Titel, URL, Quelle, Sprache und Provider werden benötigt."
+                : "Titel, URL und Quelle werden benötigt.";
+        }
+
+        if (request.Title.Length > 300
+            || request.SeriesUrl.Length > 2048
+            || request.Source.Length > 80
+            || request.MediaType.Length > 20
+            || request.Language.Length > 100
+            || request.Provider.Length > 100
+            || !SafeHttpUrl(request.SeriesUrl))
+        {
+            return "Die Anfrage enthält ungültige oder zu lange Werte.";
+        }
+
+        if (new[] { request.Title, request.Source, request.MediaType, request.Language, request.Provider }
+            .Any(value => value.Any(char.IsControl)))
+        {
+            return "Die Anfrage enthält ungültige Steuerzeichen.";
+        }
+
+        return null;
+    }
+
+    private async Task<bool> SourceIsAllowedAsync(string source, CancellationToken cancellationToken)
+    {
+        var response = await _mediaForge.GetSourcesAsync(cancellationToken).ConfigureAwait(false);
+        return ReadAllowedSources(response)
+            .Any(item => string.Equals(item.Id, source, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private async Task<MissingMediaPlan> BuildMissingPlanAsync(
+        string userId,
+        AutomaticMediaRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!_grants.IsGranted(userId, request.SeriesUrl, out var grantedSource)
+            || !string.Equals(grantedSource, request.Source, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new MediaForgeException(
+                HttpStatusCode.BadRequest,
+                "Der Titel ist nicht mehr durch deine aktuelle Suche freigegeben. Bitte die Suche neu öffnen.");
+        }
+
+        var detailTask = _mediaForge.GetSeriesAsync(request.SeriesUrl, cancellationToken);
+        var seasonsTask = _mediaForge.GetSeasonsAsync(request.SeriesUrl, cancellationToken);
+        await Task.WhenAll(detailTask, seasonsTask).ConfigureAwait(false);
+        var detail = await detailTask.ConfigureAwait(false);
+        var seasonsResponse = await seasonsTask.ConfigureAwait(false);
+        _grants.GrantFromJson(userId, request.Source, seasonsResponse);
+
+        var title = ReadJsonString(detail, "title", 300);
+        if (string.IsNullOrWhiteSpace(title))
+        {
+            title = request.Title;
+        }
+
+        var description = ReadJsonString(detail, "description", 4000);
+        var isMovie = detail.TryGetProperty("is_movie", out var movieValue)
+            ? movieValue.ValueKind == JsonValueKind.True
+            : request.MediaType == "movie";
+        if (seasonsResponse.ValueKind != JsonValueKind.Object
+            || !seasonsResponse.TryGetProperty("seasons", out var seasons)
+            || seasons.ValueKind != JsonValueKind.Array)
+        {
+            throw new MediaForgeException(HttpStatusCode.BadGateway, "MediaForge hat keine gültige Staffelliste geliefert.");
+        }
+
+        if (seasons.GetArrayLength() > 100)
+        {
+            throw new MediaForgeException(HttpStatusCode.BadRequest, "Der Titel enthält mehr als 100 Staffeln und kann nicht sicher automatisch geplant werden.");
+        }
+
+        var seasonItems = seasons.EnumerateArray().ToArray();
+        if (seasonItems.Length == 0)
+        {
+            throw new MediaForgeException(HttpStatusCode.NotFound, "Für diesen Titel wurden keine verfügbaren Inhalte gefunden.");
+        }
+
+        var missing = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var languages = new HashSet<string>(StringComparer.Ordinal);
+        var total = 0;
+        foreach (var season in seasonItems)
+        {
+            var seasonUrl = ReadJsonString(season, "url", 2048);
+            if (!MediaAccessGrantStore.TryNormalizeUrl(seasonUrl, out var normalizedSeasonUrl))
+            {
+                continue;
+            }
+
+            _grants.GrantUrl(userId, request.Source, normalizedSeasonUrl);
+            var episodesResponse = await _mediaForge.GetEpisodesAsync(normalizedSeasonUrl, cancellationToken).ConfigureAwait(false);
+            _grants.GrantFromJson(userId, request.Source, episodesResponse);
+            if (episodesResponse.ValueKind != JsonValueKind.Object
+                || !episodesResponse.TryGetProperty("episodes", out var episodes)
+                || episodes.ValueKind != JsonValueKind.Array)
+            {
+                throw new MediaForgeException(HttpStatusCode.BadGateway, "MediaForge hat keine gültige Episodenliste geliefert.");
+            }
+
+            foreach (var episode in episodes.EnumerateArray())
+            {
+                var episodeUrl = ReadJsonString(episode, "url", 2048);
+                if (!MediaAccessGrantStore.TryNormalizeUrl(episodeUrl, out var normalizedEpisodeUrl)
+                    || !seen.Add(normalizedEpisodeUrl))
+                {
+                    continue;
+                }
+
+                total++;
+                if (episode.TryGetProperty("languages", out var languageValues)
+                    && languageValues.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var languageValue in languageValues.EnumerateArray().Take(32))
+                    {
+                        if (languageValue.ValueKind == JsonValueKind.String)
+                        {
+                            var language = languageValue.GetString()?.Trim() ?? string.Empty;
+                            if (language.Length is > 0 and <= 100 && !language.Any(char.IsControl))
+                            {
+                                languages.Add(language);
+                            }
+                        }
+                    }
+                }
+
+                var downloaded = episode.TryGetProperty("downloaded", out var downloadedValue)
+                    && downloadedValue.ValueKind == JsonValueKind.True;
+                if (!downloaded)
+                {
+                    missing.Add(normalizedEpisodeUrl);
+                    if (missing.Count > MaxEpisodesPerRequest)
+                    {
+                        throw new MediaForgeException(
+                            HttpStatusCode.BadRequest,
+                            $"Es fehlen mehr als {MaxEpisodesPerRequest} Episoden. Bitte den Titel in MediaForge in mehreren Schritten einreihen.");
+                    }
+                }
+            }
+        }
+
+        if (total == 0)
+        {
+            throw new MediaForgeException(HttpStatusCode.NotFound, "Für diesen Titel wurden keine verfügbaren Episoden gefunden.");
+        }
+
+        var selectionLabel = isMovie
+            ? "Film"
+            : missing.Count == 1 ? "1 fehlende Episode" : $"{missing.Count} fehlende Episoden";
+        var providers = missing.Count == 0
+            ? new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal)
+            : await ReadProviderOptionsAsync(userId, request.Source, missing[0], cancellationToken).ConfigureAwait(false);
+        return new MissingMediaPlan(
+            title,
+            description,
+            isMovie,
+            total,
+            missing,
+            selectionLabel,
+            languages.Order(StringComparer.Ordinal).ToArray(),
+            providers);
+    }
+
+    private async Task<IReadOnlyDictionary<string, IReadOnlyList<string>>> ReadProviderOptionsAsync(
+        string userId,
+        string source,
+        string episodeUrl,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var response = await _mediaForge.GetProvidersAsync(episodeUrl, cancellationToken).ConfigureAwait(false);
+            _grants.GrantFromJson(userId, source, response);
+            var output = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
+            if (response.ValueKind != JsonValueKind.Object
+                || !response.TryGetProperty("providers", out var matrix)
+                || matrix.ValueKind != JsonValueKind.Object)
+            {
+                return output;
+            }
+
+            foreach (var property in matrix.EnumerateObject().Take(32))
+            {
+                if (property.Name.Length is < 1 or > 100
+                    || property.Name.Any(char.IsControl)
+                    || property.Value.ValueKind != JsonValueKind.Array)
+                {
+                    continue;
+                }
+
+                var values = property.Value.EnumerateArray()
+                    .Where(value => value.ValueKind == JsonValueKind.String)
+                    .Select(value => value.GetString()?.Trim() ?? string.Empty)
+                    .Where(value => value.Length is > 0 and <= 100 && !value.Any(char.IsControl))
+                    .Distinct(StringComparer.Ordinal)
+                    .Take(32)
+                    .ToArray();
+                if (values.Length > 0)
+                {
+                    output[property.Name] = values;
+                }
+            }
+
+            return output;
+        }
+        catch (MediaForgeException)
+        {
+            return new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
+        }
+    }
+
     private static string SafeIdentity(string value)
     {
         var clean = new string(value.Where(character => !char.IsControl(character)).Take(200).ToArray());
@@ -871,4 +1265,38 @@ public sealed class MediaForgeRequestsController : ControllerBase
         [property: JsonPropertyName("total_episodes")] int TotalEpisodes,
         [property: JsonPropertyName("percent")] double Percent,
         [property: JsonPropertyName("phase")] string Phase);
+
+    private sealed record MissingMediaPlan(
+        string Title,
+        string Description,
+        bool IsMovie,
+        int TotalCount,
+        IReadOnlyList<string> MissingUrls,
+        string SelectionLabel,
+        IReadOnlyList<string> Languages,
+        IReadOnlyDictionary<string, IReadOnlyList<string>> Providers)
+    {
+        public MissingPlanResponse ToResponse()
+            => new(
+                Title,
+                Description,
+                IsMovie,
+                TotalCount,
+                TotalCount - MissingUrls.Count,
+                MissingUrls.Count,
+                SelectionLabel,
+                Languages,
+                Providers);
+    }
+
+    private sealed record MissingPlanResponse(
+        [property: JsonPropertyName("title")] string Title,
+        [property: JsonPropertyName("description")] string Description,
+        [property: JsonPropertyName("is_movie")] bool IsMovie,
+        [property: JsonPropertyName("total_count")] int TotalCount,
+        [property: JsonPropertyName("existing_count")] int ExistingCount,
+        [property: JsonPropertyName("missing_count")] int MissingCount,
+        [property: JsonPropertyName("selection_label")] string SelectionLabel,
+        [property: JsonPropertyName("languages")] IReadOnlyList<string> Languages,
+        [property: JsonPropertyName("providers")] IReadOnlyDictionary<string, IReadOnlyList<string>> Providers);
 }

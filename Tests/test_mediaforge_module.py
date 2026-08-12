@@ -185,6 +185,25 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
     def _internal(self, endpoint):
         def handler():
             self.calls.append(endpoint)
+            if endpoint == "api_search":
+                return jsonify(
+                    {
+                        "results": [
+                            {
+                                "title": "Example",
+                                "url": "https://allowed.invalid/media/series",
+                                "poster_url": "https://allowed.invalid/poster.jpg",
+                            }
+                        ]
+                    }
+                )
+            if endpoint == "api_series":
+                return jsonify(
+                    {
+                        "title": "Example",
+                        "poster_url": "https://allowed.invalid/poster.jpg",
+                    }
+                )
             return jsonify({"ok": True})
 
         return handler
@@ -245,6 +264,18 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
         )
         self.assertEqual(200, response.status_code)
         self.assertEqual(["api_series"], self.calls)
+        self.assertTrue(response.get_json()["poster_url"].startswith("/api/img?url="))
+
+    def test_search_posters_are_always_rewritten_to_mediaforge_proxy_paths(self):
+        response = self.client.post(
+            "/api/v1/connector/search",
+            json={"keyword": "Example", "site": "aniworld"},
+            headers={"X-Api-Key": "library:read-key"},
+        )
+        self.assertEqual(200, response.status_code)
+        poster = response.get_json()["results"][0]["poster_url"]
+        self.assertTrue(poster.startswith("/api/img?url="))
+        self.assertNotIn("https://allowed.invalid/poster.jpg", poster)
 
     def test_download_rejects_extra_fields_and_injected_episode(self):
         base = {

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from flask import Blueprint, current_app, jsonify, request
 
@@ -78,6 +78,12 @@ def _is_mediaforge_url(value) -> bool:
         return True
     except (TypeError, ValueError):
         return False
+
+
+def _proxy_poster(payload: dict) -> None:
+    poster = payload.get("poster_url")
+    if isinstance(poster, str) and poster.startswith(("http://", "https://")):
+        payload["poster_url"] = "/api/img?url=" + quote(poster, safe="")
 
 
 def _validate_url_argument():
@@ -177,7 +183,7 @@ def create_blueprint(app, enabled_setting_key: str):
             {
                 "ok": True,
                 "module": "mediaforge_jellyfin_connector",
-                "version": "0.2.5",
+                "version": "0.2.6",
             }
         )
 
@@ -202,7 +208,17 @@ def create_blueprint(app, enabled_setting_key: str):
             return jsonify({"error": "invalid keyword"}), 400
         if not _safe_text(body.get("site"), 80):
             return jsonify({"error": "invalid source"}), 400
-        return internal["search"]()
+        upstream = current_app.make_response(internal["search"]())
+        if upstream.status_code != 200:
+            return upstream
+        payload = upstream.get_json(silent=True)
+        if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+            return jsonify({"error": "invalid search response"}), 502
+        for item in payload["results"]:
+            if not isinstance(item, dict):
+                continue
+            _proxy_poster(item)
+        return jsonify(payload)
 
     @bp.get("/api/v1/connector/series")
     def api_connector_series():
@@ -212,7 +228,14 @@ def create_blueprint(app, enabled_setting_key: str):
         validation_error = _validate_url_argument()
         if validation_error:
             return validation_error
-        return internal["series"]()
+        upstream = current_app.make_response(internal["series"]())
+        if upstream.status_code != 200:
+            return upstream
+        payload = upstream.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"error": "invalid series response"}), 502
+        _proxy_poster(payload)
+        return jsonify(payload)
 
     @bp.get("/api/v1/connector/seasons")
     def api_connector_seasons():
@@ -232,7 +255,30 @@ def create_blueprint(app, enabled_setting_key: str):
         validation_error = _validate_url_argument()
         if validation_error:
             return validation_error
-        return internal["episodes"]()
+        upstream = current_app.make_response(internal["episodes"]())
+        if upstream.status_code != 200:
+            return upstream
+        payload = upstream.get_json(silent=True)
+        if not isinstance(payload, dict) or not isinstance(payload.get("episodes"), list):
+            return jsonify({"error": "invalid episodes response"}), 502
+
+        # MediaForge 1.5 reports movie entries as not downloaded even when the
+        # target file already exists. Its provider models do expose the real
+        # check, so correct only the explicit single-movie response shape.
+        episodes = payload["episodes"]
+        if len(episodes) == 1 and isinstance(episodes[0], dict) and "season_number" in episodes[0]:
+            try:
+                provider = resolve_provider(request.args.get("url", "").strip())
+                model = provider.episode_cls(url=request.args["url"].strip())
+                state = model.is_downloaded
+                episodes[0]["downloaded"] = (
+                    bool(state.get("exists")) if isinstance(state, dict) else bool(state)
+                )
+            except Exception:  # noqa: BLE001 - optional compatibility correction
+                # Fail closed to MediaForge's original result. Queue workers
+                # perform their own final existence check as well.
+                pass
+        return jsonify(payload)
 
     @bp.get("/api/v1/connector/providers")
     def api_connector_providers():
