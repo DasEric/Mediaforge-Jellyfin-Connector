@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, current_app, jsonify, request
 
 from ....models.common.common import get_ffmpeg_progress
 from ....providers import resolve_provider
@@ -128,7 +128,7 @@ def create_blueprint(app, enabled_setting_key: str):
             {
                 "ok": True,
                 "module": "mediaforge_jellyfin_connector",
-                "version": "0.2.2",
+                "version": "0.2.3",
             }
         )
 
@@ -259,15 +259,63 @@ def create_blueprint(app, enabled_setting_key: str):
                 items.append(progress)
         return jsonify({"items": items})
 
-    scopes = {
-        "mediaforge_jellyfin_connector.api_connector_health": "status:read",
-        "mediaforge_jellyfin_connector.api_connector_sources": "library:read",
-        "mediaforge_jellyfin_connector.api_connector_search": "library:read",
-        "mediaforge_jellyfin_connector.api_connector_series": "library:read",
-        "mediaforge_jellyfin_connector.api_connector_seasons": "library:read",
-        "mediaforge_jellyfin_connector.api_connector_episodes": "library:read",
-        "mediaforge_jellyfin_connector.api_connector_providers": "library:read",
-        "mediaforge_jellyfin_connector.api_connector_download": "queue:write",
-        "mediaforge_jellyfin_connector.api_connector_progress": "queue:read",
+    # MediaForge's current startup pass reads ``_V1_ENDPOINT_SCOPES`` and
+    # correctly leaves these views free of its session-login wrapper.  A
+    # module installed or refreshed in an already running MediaForge process,
+    # however, can still be wrapped by older/current live-registration paths.
+    # Such a wrapper rejects a valid X-Api-Key unless the caller also happens
+    # to own a browser session, which machine clients such as Jellyfin do not.
+    #
+    # Blueprint before-request handlers run after MediaForge's application
+    # before-request security checks but before Flask resolves the view for
+    # dispatch.  Restore only our exact, locally captured view when a wrapper
+    # chain still terminates at that view.  The route's first operation remains
+    # ``guard()`` / ``_check_api_key()``, and no MediaForge or third-party
+    # endpoint can be affected by this narrowly keyed compatibility fallback.
+    connector_views = {
+        "mediaforge_jellyfin_connector.api_connector_health": api_connector_health,
+        "mediaforge_jellyfin_connector.api_connector_sources": api_connector_sources,
+        "mediaforge_jellyfin_connector.api_connector_search": api_connector_search,
+        "mediaforge_jellyfin_connector.api_connector_series": api_connector_series,
+        "mediaforge_jellyfin_connector.api_connector_seasons": api_connector_seasons,
+        "mediaforge_jellyfin_connector.api_connector_episodes": api_connector_episodes,
+        "mediaforge_jellyfin_connector.api_connector_providers": api_connector_providers,
+        "mediaforge_jellyfin_connector.api_connector_download": api_connector_download,
+        "mediaforge_jellyfin_connector.api_connector_progress": api_connector_progress,
     }
+
+    @bp.before_request
+    def _keep_connector_api_key_only():
+        endpoint = request.endpoint or ""
+        expected = connector_views.get(endpoint)
+        registered = current_app.view_functions.get(endpoint)
+        if expected is None or registered is None or registered is expected:
+            return None
+
+        candidate = registered
+        visited = set()
+        while candidate is not expected and id(candidate) not in visited:
+            visited.add(id(candidate))
+            candidate = getattr(candidate, "__wrapped__", None)
+            if candidate is None:
+                break
+
+        if candidate is expected:
+            current_app.view_functions[endpoint] = expected
+        return None
+
+    scopes = dict.fromkeys(connector_views)
+    scopes.update(
+        {
+            "mediaforge_jellyfin_connector.api_connector_health": "status:read",
+            "mediaforge_jellyfin_connector.api_connector_sources": "library:read",
+            "mediaforge_jellyfin_connector.api_connector_search": "library:read",
+            "mediaforge_jellyfin_connector.api_connector_series": "library:read",
+            "mediaforge_jellyfin_connector.api_connector_seasons": "library:read",
+            "mediaforge_jellyfin_connector.api_connector_episodes": "library:read",
+            "mediaforge_jellyfin_connector.api_connector_providers": "library:read",
+            "mediaforge_jellyfin_connector.api_connector_download": "queue:write",
+            "mediaforge_jellyfin_connector.api_connector_progress": "queue:read",
+        }
+    )
     return bp, scopes

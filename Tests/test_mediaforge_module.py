@@ -6,6 +6,7 @@ import importlib.util
 import sys
 import types
 import unittest
+from functools import wraps
 from pathlib import Path
 
 from flask import Flask, jsonify, request
@@ -146,6 +147,20 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
             )
         blueprint, _scopes = routes.create_blueprint(self.app, "connector_enabled")
         self.app.register_blueprint(blueprint)
+
+        # Reproduce MediaForge's blanket session-login pass. The connector
+        # must remain usable by a machine client with only X-Api-Key, while
+        # every connector view must still enforce its own scoped key.
+        for endpoint in _scopes:
+            original = self.app.view_functions[endpoint]
+
+            @wraps(original)
+            def session_login_required(*args, __original=original, **kwargs):
+                if request.headers.get("X-Test-Web-Session") != "present":
+                    return jsonify({"error": "authentication required"}), 401
+                return __original(*args, **kwargs)
+
+            self.app.view_functions[endpoint] = session_login_required
         self.client = self.app.test_client()
 
     def _internal(self, endpoint):
@@ -158,7 +173,16 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
     def test_authentication_is_required(self):
         response = self.client.get("/api/v1/connector/sources")
         self.assertEqual(401, response.status_code)
+        self.assertEqual("unauthorized", response.get_json()["error"])
         self.assertEqual([], self.calls)
+
+    def test_valid_api_key_does_not_require_a_mediaforge_web_session(self):
+        response = self.client.get(
+            "/api/v1/connector/health",
+            headers={"X-Api-Key": "status:read-key"},
+        )
+        self.assertEqual(200, response.status_code)
+        self.assertTrue(response.get_json()["ok"])
 
     def test_arbitrary_url_is_rejected_before_internal_handler(self):
         response = self.client.get(
