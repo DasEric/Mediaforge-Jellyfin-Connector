@@ -290,7 +290,7 @@ def create_blueprint(app, enabled_setting_key: str):
         expected = connector_views.get(endpoint)
         registered = current_app.view_functions.get(endpoint)
         if expected is None or registered is None or registered is expected:
-            return None
+            return
 
         candidate = registered
         visited = set()
@@ -302,7 +302,6 @@ def create_blueprint(app, enabled_setting_key: str):
 
         if candidate is expected:
             current_app.view_functions[endpoint] = expected
-        return None
 
     scopes = dict.fromkeys(connector_views)
     scopes.update(
