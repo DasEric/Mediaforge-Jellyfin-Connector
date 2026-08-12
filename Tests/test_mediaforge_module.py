@@ -204,6 +204,18 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
                         "poster_url": "https://allowed.invalid/poster.jpg",
                     }
                 )
+            if endpoint == "api_episodes":
+                return jsonify(
+                    {
+                        "episodes": [
+                            {
+                                "url": "https://allowed.invalid/media/movie",
+                                "season_number": 1,
+                                "downloaded": False,
+                            }
+                        ]
+                    }
+                )
             return jsonify({"ok": True})
 
         return handler
@@ -276,6 +288,14 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
         poster = response.get_json()["results"][0]["poster_url"]
         self.assertTrue(poster.startswith("/api/img?url="))
         self.assertNotIn("https://allowed.invalid/poster.jpg", poster)
+
+    def test_optional_movie_check_keeps_the_original_result_when_unsupported(self):
+        response = self.client.get(
+            "/api/v1/connector/episodes?url=https://allowed.invalid/media/movie",
+            headers={"X-Api-Key": "library:read-key"},
+        )
+        self.assertEqual(200, response.status_code)
+        self.assertFalse(response.get_json()["episodes"][0]["downloaded"])
 
     def test_download_rejects_extra_fields_and_injected_episode(self):
         base = {

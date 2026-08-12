@@ -183,7 +183,7 @@ def create_blueprint(app, enabled_setting_key: str):
             {
                 "ok": True,
                 "module": "mediaforge_jellyfin_connector",
-                "version": "0.2.6",
+                "version": "0.2.7",
             }
         )
 
@@ -277,7 +277,7 @@ def create_blueprint(app, enabled_setting_key: str):
             except Exception:  # noqa: BLE001 - optional compatibility correction
                 # Fail closed to MediaForge's original result. Queue workers
                 # perform their own final existence check as well.
-                pass
+                episodes[0].setdefault("downloaded", False)
         return jsonify(payload)
 
     @bp.get("/api/v1/connector/providers")
