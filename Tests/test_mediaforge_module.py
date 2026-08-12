@@ -1,0 +1,201 @@
+"""Security regression tests for the MediaForge companion routes."""
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+import types
+import unittest
+from pathlib import Path
+
+from flask import Flask, jsonify, request
+
+
+def _load_routes_module():
+    package_names = (
+        "mediaforge",
+        "mediaforge.web",
+        "mediaforge.web.routes",
+        "mediaforge.web.thirdparties",
+        "mediaforge.web.thirdparties.mediaforge_jellyfin_connector",
+        "mediaforge.models",
+        "mediaforge.models.common",
+    )
+    for name in package_names:
+        package = types.ModuleType(name)
+        package.__path__ = []
+        sys.modules[name] = package
+
+    database = types.ModuleType("mediaforge.web.db")
+    database.get_setting = lambda _key, default="": default
+    database.get_queue_item = lambda queue_id: {
+        "id": queue_id,
+        "status": "running",
+        "current_episode": 1,
+        "total_episodes": 4,
+        "series_url": "https://secret.invalid/private-title",
+        "file_path": "/private/library/file.mkv",
+        "errors": "sensitive internal error",
+    }
+    sys.modules[database.__name__] = database
+
+    common = types.ModuleType("mediaforge.models.common.common")
+    common.get_ffmpeg_progress = lambda: {
+        "active": True,
+        "percent": 50,
+        "phase": "download",
+        "file": "/private/library/file.mkv",
+    }
+    sys.modules[common.__name__] = common
+
+    api = types.ModuleType("mediaforge.web.routes.v1_api")
+
+    def check_api_key(scope):
+        if request.headers.get("X-Api-Key") != f"{scope}-key":
+            return jsonify({"error": "unauthorized"}), 401
+        return None
+
+    api._check_api_key = check_api_key
+    sys.modules[api.__name__] = api
+
+    providers = types.ModuleType("mediaforge.providers")
+
+    def resolve_provider(url):
+        if not isinstance(url, str) or not url.startswith(
+            "https://allowed.invalid/media/"
+        ):
+            raise ValueError("unsupported")
+        return object()
+
+    providers.resolve_provider = resolve_provider
+    sys.modules[providers.__name__] = providers
+
+    path = (
+        Path(__file__).parents[1]
+        / "MediaForge.Module"
+        / "mediaforge_jellyfin_connector"
+        / "routes.py"
+    )
+    name = "mediaforge.web.thirdparties.mediaforge_jellyfin_connector.routes"
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+class ConnectorRouteSecurityTests(unittest.TestCase):
+    def setUp(self):
+        routes = _load_routes_module()
+        self.app = Flask(__name__)
+        self.calls = []
+        for endpoint in routes._ROUTE_NAMES.values():
+            self.app.add_url_rule(
+                f"/internal/{endpoint}",
+                endpoint=endpoint,
+                view_func=self._internal(endpoint),
+                methods=["GET", "POST"],
+            )
+        blueprint, _scopes = routes.create_blueprint(self.app, "connector_enabled")
+        self.app.register_blueprint(blueprint)
+        self.client = self.app.test_client()
+
+    def _internal(self, endpoint):
+        def handler():
+            self.calls.append(endpoint)
+            return jsonify({"ok": True})
+
+        return handler
+
+    def test_authentication_is_required(self):
+        response = self.client.get("/api/v1/connector/sources")
+        self.assertEqual(401, response.status_code)
+        self.assertEqual([], self.calls)
+
+    def test_arbitrary_url_is_rejected_before_internal_handler(self):
+        response = self.client.get(
+            "/api/v1/connector/series?url=http://127.0.0.1/admin",
+            headers={"X-Api-Key": "library:read-key"},
+        )
+        self.assertEqual(400, response.status_code)
+        self.assertEqual([], self.calls)
+
+    def test_valid_media_url_reaches_internal_handler(self):
+        response = self.client.get(
+            "/api/v1/connector/series?url=https://allowed.invalid/media/series",
+            headers={"X-Api-Key": "library:read-key"},
+        )
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(["api_series"], self.calls)
+
+    def test_download_rejects_extra_fields_and_injected_episode(self):
+        base = {
+            "episodes": ["https://allowed.invalid/media/episode-1"],
+            "language": "German Dub",
+            "provider": "VOE",
+            "title": "Title",
+            "series_url": "https://allowed.invalid/media/series",
+            "upscale": False,
+        }
+        response = self.client.post(
+            "/api/v1/connector/download",
+            json={**base, "token": "must-not-be-accepted"},
+            headers={"X-Api-Key": "queue:write-key"},
+        )
+        self.assertEqual(400, response.status_code)
+
+        response = self.client.post(
+            "/api/v1/connector/download",
+            json={**base, "episodes": ["http://127.0.0.1/admin"]},
+            headers={"X-Api-Key": "queue:write-key"},
+        )
+        self.assertEqual(400, response.status_code)
+        self.assertEqual([], self.calls)
+
+    def test_valid_download_reaches_internal_handler(self):
+        response = self.client.post(
+            "/api/v1/connector/download",
+            json={
+                "episodes": ["https://allowed.invalid/media/episode-1"],
+                "language": "German Dub",
+                "provider": "VOE",
+                "title": "Title",
+                "series_url": "https://allowed.invalid/media/series",
+                "upscale": False,
+            },
+            headers={"X-Api-Key": "queue:write-key"},
+        )
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(["api_download"], self.calls)
+
+    def test_progress_is_scoped_and_contains_no_sensitive_queue_fields(self):
+        response = self.client.post(
+            "/api/v1/connector/progress",
+            json={"queue_ids": [42]},
+            headers={"X-Api-Key": "queue:read-key"},
+        )
+        self.assertEqual(200, response.status_code)
+        item = response.get_json()["items"][0]
+        self.assertEqual(42, item["queue_id"])
+        self.assertEqual(37.5, item["percent"])
+        self.assertEqual(
+            {"queue_id", "status", "current_episode", "total_episodes", "percent", "phase"},
+            set(item),
+        )
+        self.assertNotIn("file_path", response.get_data(as_text=True))
+        self.assertNotIn("series_url", response.get_data(as_text=True))
+
+    def test_progress_rejects_invalid_or_duplicate_ids(self):
+        headers = {"X-Api-Key": "queue:read-key"}
+        for queue_ids in ([1, 1], [0], [True], ["1"]):
+            response = self.client.post(
+                "/api/v1/connector/progress",
+                json={"queue_ids": queue_ids},
+                headers=headers,
+            )
+            self.assertEqual(400, response.status_code)
+
+
+if __name__ == "__main__":
+    unittest.main()
