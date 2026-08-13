@@ -19,6 +19,7 @@ try
     TestConfigurationSerialization();
     TestAuthorizationBoundaries();
     TestApiJsonContracts();
+    TestPosterProxyContract();
     TestPluginPageRegistration();
     TestRequestPageContract();
     TestWebInjection();
@@ -189,6 +190,39 @@ static void TestApiJsonContracts()
         ["Data"] = "data",
         ["Error"] = "error",
     });
+}
+
+static void TestPosterProxyContract()
+{
+    var method = typeof(MediaForgeRequestsController).GetMethod(
+        "TryReadMediaForgeImageUrl",
+        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)
+        ?? throw new InvalidOperationException("Missing poster URL validator.");
+    object?[] connectorArgs =
+    [
+        "/api/v1/connector/image?url=https%3A%2F%2Fimages.example.invalid%2Fposter.jpg",
+        null,
+    ];
+    Assert((bool)method.Invoke(null, connectorArgs)!, "The connector image route was rejected.");
+    Assert(
+        connectorArgs[1] as string == "https://images.example.invalid/poster.jpg",
+        "The connector image route did not decode to the expected upstream URL.");
+
+    object?[] legacyArgs =
+    [
+        "/api/img?url=https%3A%2F%2Fimages.example.invalid%2Fposter.jpg",
+        null,
+    ];
+    Assert(!(bool)method.Invoke(null, legacyArgs)!, "The obsolete MediaForge Web UI image route was still accepted.");
+
+    var clientSource = File.ReadAllText(
+        Path.Combine("Jellyfin.Plugin.MediaForge", "Services", "MediaForgeClient.cs"));
+    Assert(
+        clientSource.Contains("include_adult = AllowAdultSources()", StringComparison.Ordinal),
+        "Jellyfin searches do not forward the administrator Adult-source setting.");
+    Assert(
+        clientSource.Contains("sources?include_adult=", StringComparison.Ordinal),
+        "Jellyfin source lists do not forward the administrator Adult-source setting.");
 }
 
 static void AssertJsonNames(string nestedTypeName, IReadOnlyDictionary<string, string> expected)

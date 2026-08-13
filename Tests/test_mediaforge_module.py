@@ -163,7 +163,18 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
             "/internal/home-feed",
             endpoint="api_home_feed",
             view_func=_mediaforge_login_required(
-                lambda: jsonify({"rows": {"new": [{"title": "Example"}]}})
+                lambda: jsonify(
+                    {
+                        "rows": {
+                            "new": [
+                                {
+                                    "title": "Example",
+                                    "poster_url": "/api/img?url=https%3A%2F%2Fallowed.invalid%2Fposter.jpg",
+                                }
+                            ]
+                        }
+                    }
+                )
             ),
         )
         self.app.add_url_rule(
@@ -185,6 +196,16 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
     def _internal(self, endpoint):
         def handler():
             self.calls.append(endpoint)
+            if endpoint == "api_search_sources":
+                return jsonify(
+                    {
+                        "sources": [
+                            {"id": "aniworld", "label": "AniWorld", "adult": False},
+                            {"id": "hanime", "label": "hanime 18+", "adult": True},
+                        ],
+                        "order": ["hanime", "aniworld"],
+                    }
+                )
             if endpoint == "api_search":
                 return jsonify(
                     {
@@ -241,6 +262,54 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
         )
         self.assertEqual(200, response.status_code)
         self.assertEqual("Example", response.get_json()["rows"]["new"][0]["title"])
+        self.assertTrue(
+            response.get_json()["rows"]["new"][0]["poster_url"].startswith(
+                "/api/v1/connector/image?url="
+            )
+        )
+
+    def test_sources_filter_adult_content_by_explicit_connector_setting(self):
+        headers = {"X-Api-Key": "library:read-key"}
+        response = self.client.get("/api/v1/connector/sources", headers=headers)
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(["aniworld"], [item["id"] for item in response.get_json()["sources"]])
+        self.assertEqual(["aniworld"], response.get_json()["order"])
+
+        response = self.client.get(
+            "/api/v1/connector/sources?include_adult=true", headers=headers
+        )
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(
+            ["aniworld", "hanime"],
+            [item["id"] for item in response.get_json()["sources"]],
+        )
+        self.assertEqual(["hanime", "aniworld"], response.get_json()["order"])
+
+    def test_sources_reject_invalid_adult_filter_values(self):
+        response = self.client.get(
+            "/api/v1/connector/sources?include_adult=yes",
+            headers={"X-Api-Key": "library:read-key"},
+        )
+        self.assertEqual(400, response.status_code)
+
+    def test_search_blocks_adult_source_unless_explicitly_allowed(self):
+        headers = {"X-Api-Key": "library:read-key"}
+        response = self.client.post(
+            "/api/v1/connector/search",
+            json={"keyword": "Example", "site": "hanime"},
+            headers=headers,
+        )
+        self.assertEqual(403, response.status_code)
+        self.assertEqual(["api_search_sources"], self.calls)
+
+        self.calls.clear()
+        response = self.client.post(
+            "/api/v1/connector/search",
+            json={"keyword": "Example", "site": "hanime", "include_adult": True},
+            headers=headers,
+        )
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(["api_search_sources", "api_search"], self.calls)
 
     def test_image_proxy_requires_scope_and_rejects_non_http_urls(self):
         response = self.client.get(
@@ -276,7 +345,11 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
         )
         self.assertEqual(200, response.status_code)
         self.assertEqual(["api_series"], self.calls)
-        self.assertTrue(response.get_json()["poster_url"].startswith("/api/img?url="))
+        self.assertTrue(
+            response.get_json()["poster_url"].startswith(
+                "/api/v1/connector/image?url="
+            )
+        )
 
     def test_search_posters_are_always_rewritten_to_mediaforge_proxy_paths(self):
         response = self.client.post(
@@ -286,7 +359,7 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
         )
         self.assertEqual(200, response.status_code)
         poster = response.get_json()["results"][0]["poster_url"]
-        self.assertTrue(poster.startswith("/api/img?url="))
+        self.assertTrue(poster.startswith("/api/v1/connector/image?url="))
         self.assertNotIn("https://allowed.invalid/poster.jpg", poster)
 
     def test_optional_movie_check_keeps_the_original_result_when_unsupported(self):

@@ -1094,7 +1094,7 @@ public sealed class MediaForgeRequestsController : ControllerBase
             }
 
             var posterUrl = ReadJsonString(item, "poster_url", 4096);
-            if (!posterUrl.StartsWith("/api/img?", StringComparison.Ordinal))
+            if (!posterUrl.StartsWith("/api/v1/connector/image?", StringComparison.Ordinal))
             {
                 posterUrl = string.Empty;
             }
@@ -1138,7 +1138,7 @@ public sealed class MediaForgeRequestsController : ControllerBase
         normalized = string.Empty;
         if (string.IsNullOrWhiteSpace(value)
             || value.Length > 4096
-            || !value.StartsWith("/api/img?", StringComparison.Ordinal))
+            || !value.StartsWith("/api/v1/connector/image?", StringComparison.Ordinal))
         {
             return false;
         }

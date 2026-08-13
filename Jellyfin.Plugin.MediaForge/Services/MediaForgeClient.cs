@@ -23,10 +23,18 @@ public sealed class MediaForgeClient
         => SendAsync(HttpMethod.Get, "api/v1/connector/health", null, cancellationToken);
 
     public Task<JsonElement> GetSourcesAsync(CancellationToken cancellationToken)
-        => SendAsync(HttpMethod.Get, "api/v1/connector/sources", null, cancellationToken);
+        => SendAsync(
+            HttpMethod.Get,
+            $"api/v1/connector/sources?include_adult={AllowAdultSources().ToString().ToLowerInvariant()}",
+            null,
+            cancellationToken);
 
     public Task<JsonElement> SearchAsync(string keyword, string site, CancellationToken cancellationToken)
-        => SendAsync(HttpMethod.Post, "api/v1/connector/search", new { keyword, site }, cancellationToken);
+        => SendAsync(
+            HttpMethod.Post,
+            "api/v1/connector/search",
+            new { keyword, site, include_adult = AllowAdultSources() },
+            cancellationToken);
 
     public Task<JsonElement> GetSeriesAsync(string url, CancellationToken cancellationToken)
         => GetWithUrlAsync("api/v1/connector/series", url, cancellationToken);
@@ -146,6 +154,9 @@ public sealed class MediaForgeClient
 
     private Task<JsonElement> GetWithUrlAsync(string path, string url, CancellationToken cancellationToken)
         => SendAsync(HttpMethod.Get, $"{path}?url={Uri.EscapeDataString(url)}", null, cancellationToken);
+
+    private static bool AllowAdultSources()
+        => Plugin.Instance?.Configuration.AllowAdultSources == true;
 
     private async Task<JsonElement> SendAsync(
         HttpMethod method,

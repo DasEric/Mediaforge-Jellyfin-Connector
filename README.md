@@ -144,11 +144,11 @@ One-time setup:
    tags**, keep **Selected branches and tags** and add a tag rule named `v*`.
    This allows version tags to deploy the repository feed without permitting
    arbitrary refs.
-4. Publish version `0.2.7`:
+4. Publish version `0.2.8`:
 
 ```powershell
-git tag -a v0.2.7 -m "MediaForge Requests 0.2.7"
-git push origin v0.2.7
+git tag -a v0.2.8 -m "MediaForge Requests 0.2.8"
+git push origin v0.2.8
 ```
 
 After the workflow completes successfully, the Jellyfin feed is available at:
@@ -161,11 +161,11 @@ For a later update, update all version references atomically, review the
 changelog, and push the matching tag:
 
 ```powershell
-.\scripts\set-version.ps1 -Version 0.2.7
+.\scripts\set-version.ps1 -Version 0.2.8
 git add .
-git commit -m "Release 0.2.7"
-git tag -a v0.2.7 -m "MediaForge Requests 0.2.7"
-git push origin main v0.2.7
+git commit -m "Release 0.2.8"
+git tag -a v0.2.8 -m "MediaForge Requests 0.2.8"
+git push origin main v0.2.8
 ```
 
 Jellyfin recognizes the newer version during its next plugin update check by
@@ -177,7 +177,7 @@ directory, but Jellyfin's plugin updater cannot install that module in
 MediaForge.
 
 The Jellyfin plugin can also be installed manually. Extract
-`dist/MediaForgeRequests_0.2.7.zip` to
+`dist/MediaForgeRequests_0.2.8.zip` to
 `/var/lib/jellyfin/plugins/MediaForgeRequests/`. The destination directory must
 contain `Jellyfin.Plugin.MediaForge.dll` and `meta.json`.
 
@@ -196,8 +196,8 @@ If `dotnet` is not available through `PATH`:
 The build creates:
 
 - `dist/Jellyfin.Plugin.MediaForge.dll`
-- `dist/MediaForgeRequests_0.2.7.zip`
-- `dist/mediaforge_jellyfin_connector_0.2.7.zip`
+- `dist/MediaForgeRequests_0.2.8.zip`
+- `dist/mediaforge_jellyfin_connector_0.2.8.zip`
 - `dist/SHA256SUMS.txt`
 
 Remove all generated build output, repository manifests, and local test caches

@@ -82,8 +82,53 @@ def _is_mediaforge_url(value) -> bool:
 
 def _proxy_poster(payload: dict) -> None:
     poster = payload.get("poster_url")
-    if isinstance(poster, str) and poster.startswith(("http://", "https://")):
-        payload["poster_url"] = "/api/img?url=" + quote(poster, safe="")
+    connector_path = "/api/v1/connector/image?url="
+    if not isinstance(poster, str) or not poster:
+        return
+    if poster.startswith(connector_path):
+        return
+    if poster.startswith("/api/img?url="):
+        payload["poster_url"] = connector_path + poster.removeprefix("/api/img?url=")
+    elif poster.startswith(("http://", "https://")):
+        payload["poster_url"] = connector_path + quote(poster, safe="")
+    else:
+        payload["poster_url"] = ""
+
+
+def _proxy_posters(value) -> None:
+    if isinstance(value, dict):
+        _proxy_poster(value)
+        for child in value.values():
+            _proxy_posters(child)
+    elif isinstance(value, list):
+        for child in value:
+            _proxy_posters(child)
+
+
+def _parse_include_adult(value, *, default: bool = False):
+    if value is None:
+        return default
+    if value is True or (isinstance(value, str) and value in {"1", "true"}):
+        return True
+    if value is False or (isinstance(value, str) and value in {"0", "false"}):
+        return False
+    return None
+
+
+def _read_source_policy(response):
+    payload = response.get_json(silent=True)
+    if not isinstance(payload, dict) or not isinstance(payload.get("sources"), list):
+        return None
+    sources = []
+    for item in payload["sources"]:
+        if (
+            isinstance(item, dict)
+            and isinstance(item.get("id"), str)
+            and isinstance(item.get("adult"), bool)
+        ):
+            sources.append(item)
+    payload["sources"] = sources
+    return payload
 
 
 def _validate_url_argument():
@@ -183,7 +228,7 @@ def create_blueprint(app, enabled_setting_key: str):
             {
                 "ok": True,
                 "module": "mediaforge_jellyfin_connector",
-                "version": "0.2.7",
+                "version": "0.2.8",
             }
         )
 
@@ -192,7 +237,23 @@ def create_blueprint(app, enabled_setting_key: str):
         auth_error = guard("library:read")
         if auth_error:
             return auth_error
-        return internal["sources"]()
+        if set(request.args) - {"include_adult"}:
+            return jsonify({"error": "unexpected query parameters"}), 400
+        include_adult = _parse_include_adult(request.args.get("include_adult"))
+        if include_adult is None:
+            return jsonify({"error": "invalid include_adult value"}), 400
+        upstream = current_app.make_response(internal["sources"]())
+        if upstream.status_code != 200:
+            return upstream
+        payload = _read_source_policy(upstream)
+        if payload is None:
+            return jsonify({"error": "invalid sources response"}), 502
+        if not include_adult:
+            payload["sources"] = [item for item in payload["sources"] if not item["adult"]]
+        visible_ids = {item["id"] for item in payload["sources"]}
+        if isinstance(payload.get("order"), list):
+            payload["order"] = [source_id for source_id in payload["order"] if source_id in visible_ids]
+        return jsonify(payload)
 
     @bp.post("/api/v1/connector/search")
     def api_connector_search():
@@ -202,22 +263,38 @@ def create_blueprint(app, enabled_setting_key: str):
         body = request.get_json(silent=True)
         if not isinstance(body, dict):
             return jsonify({"error": "JSON object required"}), 400
-        if set(body) - {"keyword", "site"}:
+        if set(body) - {"keyword", "site", "include_adult"}:
             return jsonify({"error": "unexpected request fields"}), 400
         if not _safe_text(body.get("keyword"), 120) or len(body["keyword"].strip()) < 2:
             return jsonify({"error": "invalid keyword"}), 400
         if not _safe_text(body.get("site"), 80):
             return jsonify({"error": "invalid source"}), 400
+        include_adult = _parse_include_adult(body.get("include_adult"))
+        if include_adult is None:
+            return jsonify({"error": "invalid include_adult value"}), 400
+
+        sources_response = current_app.make_response(internal["sources"]())
+        if sources_response.status_code != 200:
+            return sources_response
+        source_policy = _read_source_policy(sources_response)
+        if source_policy is None:
+            return jsonify({"error": "invalid sources response"}), 502
+        source = next(
+            (item for item in source_policy["sources"] if item["id"] == body["site"].strip()),
+            None,
+        )
+        if source is None:
+            return jsonify({"error": "unknown source"}), 400
+        if source["adult"] and not include_adult:
+            return jsonify({"error": "adult source not permitted", "code": "age_limited"}), 403
+
         upstream = current_app.make_response(internal["search"]())
         if upstream.status_code != 200:
             return upstream
         payload = upstream.get_json(silent=True)
         if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
             return jsonify({"error": "invalid search response"}), 502
-        for item in payload["results"]:
-            if not isinstance(item, dict):
-                continue
-            _proxy_poster(item)
+        _proxy_posters(payload["results"])
         return jsonify(payload)
 
     @bp.get("/api/v1/connector/series")
@@ -366,7 +443,16 @@ def create_blueprint(app, enabled_setting_key: str):
         if request.args:
             return jsonify({"error": "unexpected query parameters"}), 400
         handler = late_internal("api_home_feed")
-        return handler() if handler is not None else (jsonify({"error": "home feed unavailable"}), 503)
+        if handler is None:
+            return jsonify({"error": "home feed unavailable"}), 503
+        upstream = current_app.make_response(handler())
+        if upstream.status_code != 200:
+            return upstream
+        payload = upstream.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"error": "invalid home feed response"}), 502
+        _proxy_posters(payload)
+        return jsonify(payload)
 
     @bp.get("/api/v1/connector/image")
     def api_connector_image():
