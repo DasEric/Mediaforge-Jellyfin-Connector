@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from urllib.parse import parse_qs, quote, urlsplit
 
 from flask import Blueprint, current_app, jsonify, request
@@ -218,6 +219,28 @@ def _safe_progress_item(queue_id: int, item, live_progress):
     }
 
 
+def _accepted_episode_count(queue_id: int):
+    """Read only the number of episode URLs persisted by MediaForge."""
+    try:
+        item = get_queue_item(queue_id)
+        if not isinstance(item, dict):
+            return None
+        episodes = item.get("episodes")
+        if isinstance(episodes, str):
+            episodes = json.loads(episodes)
+        if not isinstance(episodes, list) or not all(
+            isinstance(value, str) for value in episodes
+        ):
+            return None
+        return len(episodes)
+    except Exception as exc:  # noqa: BLE001 - optional post-insert diagnostic
+        current_app.logger.warning(
+            "MediaForge connector could not verify the queued episode count (%s)",
+            type(exc).__name__,
+        )
+        return None
+
+
 def create_blueprint(app, enabled_setting_key: str, module_version: str = "unknown"):
     """Create the connector blueprint and return its endpoint/scope map.
 
@@ -422,7 +445,20 @@ def create_blueprint(app, enabled_setting_key: str, module_version: str = "unkno
             return jsonify({"error": "invalid provider"}), 400
         if "upscale" in body and not isinstance(body["upscale"], bool):
             return jsonify({"error": "invalid upscale flag"}), 400
-        return internal["download"]()
+        upstream = current_app.make_response(internal["download"]())
+        if upstream.status_code != 200:
+            return upstream
+        payload = upstream.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return upstream
+        queue_id = payload.get("queue_id")
+        if isinstance(queue_id, str) and queue_id.isdecimal():
+            queue_id = int(queue_id)
+        if isinstance(queue_id, int) and not isinstance(queue_id, bool) and queue_id > 0:
+            accepted_count = _accepted_episode_count(queue_id)
+            if accepted_count is not None:
+                payload["accepted_episode_count"] = accepted_count
+        return jsonify(payload)
 
     @bp.post("/api/v1/connector/progress")
     def api_connector_progress():

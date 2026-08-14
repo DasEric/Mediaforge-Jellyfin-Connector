@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import types
 import unittest
@@ -47,6 +48,9 @@ def _load_routes_module(*, modern: bool = True):
         "series_url": "https://secret.invalid/private-title",
         "file_path": "/private/library/file.mkv",
         "errors": "sensitive internal error",
+        "episodes": json.dumps(
+            (request.get_json(silent=True) or {}).get("episodes", [])
+        ),
     }
     sys.modules[database.__name__] = database
 
@@ -172,6 +176,7 @@ def _load_connector_package(*, modern: bool = True):
 class ConnectorRouteSecurityTests(unittest.TestCase):
     def setUp(self):
         routes = _load_routes_module()
+        self.routes = routes
         self.app = Flask(__name__)
         self.calls = []
         for endpoint in routes._ROUTE_NAMES.values():
@@ -279,6 +284,8 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
                         ]
                     }
                 )
+            if endpoint == "api_download":
+                return jsonify({"queue_id": 42})
             return jsonify({"ok": True})
 
         return handler
@@ -481,7 +488,10 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
         response = self.client.post(
             "/api/v1/connector/download",
             json={
-                "episodes": ["https://allowed.invalid/media/episode-1"],
+                "episodes": [
+                    "https://allowed.invalid/media/episode-1",
+                    "https://allowed.invalid/media/episode-2",
+                ],
                 "language": "German Dub",
                 "provider": "VOE",
                 "title": "Title",
@@ -492,6 +502,28 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
         )
         self.assertEqual(200, response.status_code)
         self.assertEqual(["api_download"], self.calls)
+        self.assertEqual(42, response.get_json()["queue_id"])
+        self.assertEqual(2, response.get_json()["accepted_episode_count"])
+
+    def test_optional_queue_count_check_cannot_turn_success_into_failure(self):
+        def unavailable(_queue_id):
+            raise RuntimeError("database temporarily unavailable")
+
+        self.routes.get_queue_item = unavailable
+        response = self.client.post(
+            "/api/v1/connector/download",
+            json={
+                "episodes": ["https://allowed.invalid/media/episode-1"],
+                "language": "German Dub",
+                "provider": "VOE",
+                "title": "Title",
+                "series_url": "https://allowed.invalid/media/series",
+                "upscale": False,
+            },
+            headers={"X-Api-Key": "queue:write-key"},
+        )
+        self.assertEqual(200, response.status_code)
+        self.assertEqual({"queue_id": 42}, response.get_json())
 
     def test_progress_is_scoped_and_contains_no_sensitive_queue_fields(self):
         response = self.client.post(

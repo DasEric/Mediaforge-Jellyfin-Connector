@@ -28,6 +28,7 @@ try
     TestPosterProxyContract();
     TestJellyfinLibraryMatching();
     TestJellyfinLibraryQueries();
+    await TestEpisodePlanningContractAsync();
     TestServiceRegistrationAndImageTypes();
     TestQueueResponseContract();
     TestPluginPageRegistration();
@@ -446,7 +447,9 @@ static void TestQueueResponseContract()
 {
     var method = typeof(MediaForgeClient).GetMethod(nameof(MediaForgeClient.QueueAsync))
         ?? throw new InvalidOperationException("Missing MediaForge queue method.");
-    Assert(method.ReturnType == typeof(Task<long>), "A queue submission may still succeed without a trackable queue ID.");
+    Assert(
+        method.ReturnType == typeof(Task<MediaForgeQueueResult>),
+        "A queue submission does not expose its verified queue metadata.");
 
     var source = File.ReadAllText(Path.Combine(
         "Jellyfin.Plugin.MediaForge",
@@ -458,6 +461,119 @@ static void TestQueueResponseContract()
     Assert(
         source.Contains("keine gültige Warteschlangen-ID", StringComparison.Ordinal),
         "Malformed successful queue responses do not fail closed.");
+}
+
+static async Task TestEpisodePlanningContractAsync()
+{
+    using var validDocument = JsonDocument.Parse(
+        """
+        {
+          "episodes": [
+            {
+              "url": "https://allowed.invalid/media/episode-1",
+              "episode_number": 1,
+              "languages": ["German Dub", "English Sub"]
+            },
+            {
+              "url": "https://allowed.invalid/media/episode-2",
+              "episode_number": "2",
+              "languages": ["German Dub"]
+            }
+          ]
+        }
+        """);
+    var parsed = MediaForgeEpisodeParser.Parse(validDocument.RootElement, 3);
+    Assert(parsed.Count == 2, "A complete MediaForge season was not preserved.");
+    Assert(parsed.All(item => item.SeasonNumber == 3), "The season fallback was not applied to every episode.");
+    Assert(parsed.Select(item => item.EpisodeNumber).SequenceEqual([1, 2]), "Episode numbers changed while planning.");
+    Assert(parsed[0].Languages.SetEquals(["German Dub", "English Sub"]), "Episode languages changed while planning.");
+    Assert(MediaForgeEpisodeParser.SatisfiesExpectedCount(2, parsed.Count), "A complete season was treated as partial.");
+    Assert(!MediaForgeEpisodeParser.SatisfiesExpectedCount(3, parsed.Count), "A partial season was accepted for queueing.");
+
+    using var validSeason = JsonDocument.Parse("{\"episode_count\":\"2\"}");
+    Assert(
+        MediaForgeRequestsController.ReadExpectedEpisodeCount(validSeason.RootElement) == 2,
+        "A valid expected episode count was not accepted.");
+    foreach (var invalidSeasonJson in new[] { "{}", "{\"episode_count\":-1}", "{\"episode_count\":null}" })
+    {
+        using var invalidSeason = JsonDocument.Parse(invalidSeasonJson);
+        var rejected = false;
+        try
+        {
+            MediaForgeRequestsController.ReadExpectedEpisodeCount(invalidSeason.RootElement);
+        }
+        catch (MediaForgeException)
+        {
+            rejected = true;
+        }
+
+        Assert(rejected, "An invalid expected episode count disabled completeness verification.");
+    }
+
+    foreach (var invalidJson in new[]
+             {
+                 "{\"episodes\":[{\"url\":\"not-a-url\"}]}",
+                 "{\"episodes\":[{\"url\":\"https://allowed.invalid/media/episode-1\"},{\"url\":\"https://allowed.invalid/media/episode-1\"}]}",
+                 "{\"episodes\":[{}]}",
+             })
+    {
+        using var invalidDocument = JsonDocument.Parse(invalidJson);
+        var rejected = false;
+        try
+        {
+            MediaForgeEpisodeParser.Parse(invalidDocument.RootElement, 1);
+        }
+        catch (MediaForgeException)
+        {
+            rejected = true;
+        }
+
+        Assert(rejected, "An unsafe or incomplete episode list was silently shortened.");
+    }
+
+    using var partialDocument = JsonDocument.Parse(
+        "{\"episodes\":[{\"url\":\"https://allowed.invalid/media/episode-1\",\"episode_number\":1}]}");
+    var retryResponses = new Queue<JsonElement>(
+        [partialDocument.RootElement.Clone(), validDocument.RootElement.Clone()]);
+    var retryFetches = 0;
+    var observedResponses = 0;
+    var retried = await MediaForgeEpisodeParser.FetchCompleteAsync(
+        _ =>
+        {
+            retryFetches++;
+            return Task.FromResult(retryResponses.Dequeue());
+        },
+        _ => observedResponses++,
+        3,
+        2,
+        CancellationToken.None);
+    Assert(
+        retryFetches == 2 && observedResponses == 2 && retried.Count == 2,
+        "An incomplete first season response was not replaced by one complete retry.");
+
+    retryFetches = 0;
+    var partialRejected = false;
+    try
+    {
+        await MediaForgeEpisodeParser.FetchCompleteAsync(
+            _ =>
+            {
+                retryFetches++;
+                return Task.FromResult(partialDocument.RootElement.Clone());
+            },
+            _ => { },
+            1,
+            2,
+            CancellationToken.None);
+    }
+    catch (MediaForgeException)
+    {
+        partialRejected = true;
+    }
+
+    Assert(
+        partialRejected && retryFetches == 2,
+        "Two incomplete season responses did not fail closed before queueing.");
 }
 
 static void AssertJsonNames(string nestedTypeName, IReadOnlyDictionary<string, string> expected)
@@ -573,7 +689,15 @@ static async Task TestRequestStoreAsync(string testRoot)
     request.Episodes = ["https://example.invalid/episode/3"];
     var third = await store.TryAddAsync("user-a", "User", request, RequestStatuses.Pending, 10, CancellationToken.None);
     Assert(await store.TryClaimAsync(third.Request!.Id, CancellationToken.None), "Pending request could not be claimed.");
-    await store.MarkQueuedAsync(third.Request.Id, 42, "Admin", CancellationToken.None);
+    await store.MarkQueuedAsync(
+        third.Request.Id,
+        42,
+        "Admin",
+        "Safe count-only warning",
+        CancellationToken.None);
+    Assert(
+        (await store.GetAsync(third.Request.Id, CancellationToken.None))?.Error == "Safe count-only warning",
+        "A queue-count mismatch warning was not persisted without retrying the submission.");
     var otherUser = await store.TryAddAsync("user-b", "Other", request, RequestStatuses.Pending, 10, CancellationToken.None);
     Assert(await store.TryClaimAsync(otherUser.Request!.Id, CancellationToken.None), "Other user's request could not be claimed.");
     await store.MarkQueuedAsync(otherUser.Request.Id, 42, "Admin", CancellationToken.None);

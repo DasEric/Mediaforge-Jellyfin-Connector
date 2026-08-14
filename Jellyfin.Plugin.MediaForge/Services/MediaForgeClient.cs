@@ -146,7 +146,7 @@ public sealed class MediaForgeClient
         }
     }
 
-    public async Task<long> QueueAsync(MediaRequest request, CancellationToken cancellationToken)
+    public async Task<MediaForgeQueueResult> QueueAsync(MediaRequest request, CancellationToken cancellationToken)
     {
         var response = await SendAsync(
             HttpMethod.Post,
@@ -162,21 +162,37 @@ public sealed class MediaForgeClient
             },
             cancellationToken).ConfigureAwait(false);
 
+        long? parsedQueueId = null;
         if (response.TryGetProperty("queue_id", out var queueId))
         {
             if (queueId.ValueKind == JsonValueKind.Number
                 && queueId.TryGetInt64(out var numeric)
                 && numeric > 0)
             {
-                return numeric;
+                parsedQueueId = numeric;
             }
 
-            if (queueId.ValueKind == JsonValueKind.String
+            if (!parsedQueueId.HasValue
+                && queueId.ValueKind == JsonValueKind.String
                 && long.TryParse(queueId.GetString(), out numeric)
                 && numeric > 0)
             {
-                return numeric;
+                parsedQueueId = numeric;
             }
+        }
+
+        if (parsedQueueId.HasValue)
+        {
+            int? acceptedEpisodeCount = null;
+            if (response.TryGetProperty("accepted_episode_count", out var count)
+                && count.ValueKind == JsonValueKind.Number
+                && count.TryGetInt32(out var numericCount)
+                && numericCount is >= 0 and <= 500)
+            {
+                acceptedEpisodeCount = numericCount;
+            }
+
+            return new MediaForgeQueueResult(parsedQueueId.Value, acceptedEpisodeCount);
         }
 
         throw new MediaForgeException(
@@ -317,6 +333,9 @@ public sealed class MediaForgeClient
 }
 
 public sealed record MediaForgeImage(byte[] Data, string MediaType);
+
+/// <summary>Verified queue metadata returned by the MediaForge connector.</summary>
+public sealed record MediaForgeQueueResult(long QueueId, int? AcceptedEpisodeCount);
 
 /// <summary>Error returned while talking to MediaForge.</summary>
 public sealed class MediaForgeException : Exception

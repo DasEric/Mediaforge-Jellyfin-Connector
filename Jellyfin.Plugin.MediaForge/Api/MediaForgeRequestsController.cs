@@ -727,8 +727,17 @@ public sealed class MediaForgeRequestsController : ControllerBase
                 request = await _store.GetAsync(id, CancellationToken.None).ConfigureAwait(false) ?? request;
             }
 
-            var queueId = await _mediaForge.QueueAsync(request, cancellationToken).ConfigureAwait(false);
-            await _store.MarkQueuedAsync(id, queueId, decidedBy, CancellationToken.None).ConfigureAwait(false);
+            var queueResult = await _mediaForge.QueueAsync(request, cancellationToken).ConfigureAwait(false);
+            var warning = queueResult.AcceptedEpisodeCount.HasValue
+                && queueResult.AcceptedEpisodeCount.Value != request.Episodes.Count
+                ? $"MediaForge hat {queueResult.AcceptedEpisodeCount.Value} von {request.Episodes.Count} geplanten Episoden bestätigt. Die Warteschlange wurde nicht erneut gesendet."
+                : null;
+            await _store.MarkQueuedAsync(
+                id,
+                queueResult.QueueId,
+                decidedBy,
+                warning,
+                CancellationToken.None).ConfigureAwait(false);
         }
         catch (Exception exception) when (exception is MediaForgeException or HttpRequestException or OperationCanceledException)
         {
@@ -959,74 +968,67 @@ public sealed class MediaForgeRequestsController : ControllerBase
         var total = 0;
         foreach (var season in seasonItems)
         {
+            if (season.ValueKind != JsonValueKind.Object)
+            {
+                throw InvalidSeasonList();
+            }
+
             var seasonUrl = ReadJsonString(season, "url", 2048);
             var seasonNumber = ReadOptionalInt(season, "season_number");
+            var expectedEpisodeCount = ReadExpectedEpisodeCount(season);
             if (!MediaAccessGrantStore.TryNormalizeUrl(seasonUrl, out var normalizedSeasonUrl))
             {
-                continue;
+                throw InvalidSeasonList();
             }
 
             _grants.GrantUrl(userId, request.Source, normalizedSeasonUrl);
-            var episodesResponse = await _mediaForge.GetEpisodesAsync(normalizedSeasonUrl, cancellationToken).ConfigureAwait(false);
-            _grants.GrantFromJson(userId, request.Source, episodesResponse);
-            if (episodesResponse.ValueKind != JsonValueKind.Object
-                || !episodesResponse.TryGetProperty("episodes", out var episodes)
-                || episodes.ValueKind != JsonValueKind.Array)
+            var seasonEpisodes = await MediaForgeEpisodeParser.FetchCompleteAsync(
+                token => _mediaForge.GetEpisodesAsync(normalizedSeasonUrl, token),
+                response => _grants.GrantFromJson(userId, request.Source, response),
+                seasonNumber,
+                expectedEpisodeCount,
+                cancellationToken).ConfigureAwait(false);
+            foreach (var episode in seasonEpisodes)
             {
-                throw new MediaForgeException(HttpStatusCode.BadGateway, "MediaForge hat keine gültige Episodenliste geliefert.");
-            }
-
-            foreach (var episode in episodes.EnumerateArray())
-            {
-                var episodeUrl = ReadJsonString(episode, "url", 2048);
-                if (!MediaAccessGrantStore.TryNormalizeUrl(episodeUrl, out var normalizedEpisodeUrl)
-                    || !seen.Add(normalizedEpisodeUrl))
+                if (!seen.Add(episode.Url))
                 {
-                    continue;
+                    throw new MediaForgeException(
+                        HttpStatusCode.BadGateway,
+                        "MediaForge hat doppelte Episoden-URLs geliefert. Es wurde nichts eingereiht.");
                 }
 
                 total++;
-                var episodeNumber = ReadOptionalInt(episode, "episode_number");
-                var episodeSeason = ReadOptionalInt(episode, "season_number") ?? seasonNumber;
+                if (!isMovie
+                    && (episode.SeasonNumber is null or < 0
+                        || episode.EpisodeNumber is null or <= 0))
+                {
+                    throw new MediaForgeException(
+                        HttpStatusCode.BadGateway,
+                        "MediaForge hat eine Episode ohne gültige Staffel- oder Folgennummer geliefert. Es wurde nichts eingereiht.");
+                }
+
                 var alreadyAvailable = isMovie
                     ? libraryState.ItemExists
-                    : episodeSeason.HasValue
-                        && episodeNumber.HasValue
+                    : episode.SeasonNumber.HasValue
+                        && episode.EpisodeNumber.HasValue
                         && libraryState.Episodes.Contains(new LibraryEpisodeKey(
-                            episodeSeason.Value,
-                            episodeNumber.Value));
+                            episode.SeasonNumber.Value,
+                            episode.EpisodeNumber.Value));
                 if (!alreadyAvailable)
                 {
-                    var episodeLanguages = new HashSet<string>(StringComparer.Ordinal);
-                    if (episode.TryGetProperty("languages", out var languageValues)
-                        && languageValues.ValueKind == JsonValueKind.Array)
-                    {
-                        foreach (var languageValue in languageValues.EnumerateArray().Take(32))
-                        {
-                            if (languageValue.ValueKind == JsonValueKind.String)
-                            {
-                                var language = languageValue.GetString()?.Trim() ?? string.Empty;
-                                if (language.Length is > 0 and <= 100 && !language.Any(char.IsControl))
-                                {
-                                    episodeLanguages.Add(language);
-                                }
-                            }
-                        }
-                    }
-
-                    if (episodeLanguages.Count > 0)
+                    if (episode.Languages.Count > 0)
                     {
                         if (languages is null)
                         {
-                            languages = episodeLanguages;
+                            languages = new HashSet<string>(episode.Languages, StringComparer.Ordinal);
                         }
                         else
                         {
-                            languages.IntersectWith(episodeLanguages);
+                            languages.IntersectWith(episode.Languages);
                         }
                     }
 
-                    missing.Add(normalizedEpisodeUrl);
+                    missing.Add(episode.Url);
                     if (missing.Count > MaxEpisodesPerRequest)
                     {
                         throw new MediaForgeException(
@@ -1058,6 +1060,22 @@ public sealed class MediaForgeRequestsController : ControllerBase
             languages is null ? Array.Empty<string>() : languages.Order(StringComparer.Ordinal).ToArray(),
             providers);
     }
+
+    internal static int ReadExpectedEpisodeCount(JsonElement season)
+    {
+        var count = ReadOptionalInt(season, "episode_count");
+        if (!count.HasValue || count.Value < 0)
+        {
+            throw InvalidSeasonList();
+        }
+
+        return count.Value;
+    }
+
+    private static MediaForgeException InvalidSeasonList()
+        => new(
+            HttpStatusCode.BadGateway,
+            "MediaForge hat eine unvollständige oder ungültige Staffelliste geliefert. Es wurde nichts eingereiht.");
 
     private async Task<IReadOnlyDictionary<string, IReadOnlyList<string>>> ReadProviderOptionsAsync(
         string userId,

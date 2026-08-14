@@ -183,6 +183,14 @@ public sealed class RequestStore
     public Task MarkQueuedAsync(long id, long? queueId, string decidedBy, CancellationToken cancellationToken)
         => UpdateDecisionAsync(id, RequestStatuses.Queued, decidedBy, queueId, null, cancellationToken);
 
+    public Task MarkQueuedAsync(
+        long id,
+        long? queueId,
+        string decidedBy,
+        string? warning,
+        CancellationToken cancellationToken)
+        => UpdateDecisionAsync(id, RequestStatuses.Queued, decidedBy, queueId, warning, cancellationToken);
+
     public Task MarkFailedAsync(long id, string error, string decidedBy, CancellationToken cancellationToken)
         => UpdateDecisionAsync(id, RequestStatuses.Failed, decidedBy, null, error, cancellationToken);
 
