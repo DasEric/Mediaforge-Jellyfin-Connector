@@ -14,7 +14,7 @@ public sealed class PluginServiceRegistrator : IPluginServiceRegistrator
             .AddHttpClient<MediaForgeClient>(client =>
             {
                 client.Timeout = TimeSpan.FromSeconds(90);
-                client.DefaultRequestHeaders.UserAgent.ParseAdd("Jellyfin-MediaForge-Requests/0.3.0");
+                client.DefaultRequestHeaders.UserAgent.ParseAdd("Jellyfin-MediaForge-Requests/0.3.1");
             })
             .RedactLoggedHeaders(["X-Api-Key"])
             .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
@@ -22,7 +22,10 @@ public sealed class PluginServiceRegistrator : IPluginServiceRegistrator
                 // Never forward the custom API-key header through an upstream redirect.
                 AllowAutoRedirect = false,
                 UseCookies = false,
-                MaxConnectionsPerServer = 16,
+                // Matches the controller's hard source cap so one stalled
+                // source cannot keep another allowed source waiting for a
+                // connection slot until its own 15-second deadline expires.
+                MaxConnectionsPerServer = 32,
             });
         serviceCollection.AddSingleton<RequestStore>();
         serviceCollection.AddSingleton<MediaAccessGrantStore>();

@@ -71,6 +71,7 @@ public sealed class MediaForgeRequestsController : ControllerBase
             maintenanceMessage = config?.MaintenanceMessage ?? string.Empty,
             defaultLanguage = config?.DefaultLanguage ?? "German Dub",
             defaultProvider = config?.DefaultProvider ?? "VOE",
+            maxSearchSources = Math.Clamp(config?.MaxSearchSources ?? 8, 1, MaxKnownSources),
         });
     }
 
@@ -167,7 +168,8 @@ public sealed class MediaForgeRequestsController : ControllerBase
         CancellationToken cancellationToken = default)
     {
         var (userId, _) = CurrentUser();
-        if (!Allow(userId, "search", 12))
+        var searchesAllSources = string.Equals(source, "all", StringComparison.OrdinalIgnoreCase);
+        if (!Allow(userId, searchesAllSources ? "search" : "search-source", searchesAllSources ? 12 : 120))
         {
             return RateLimitExceeded();
         }
@@ -176,7 +178,7 @@ public sealed class MediaForgeRequestsController : ControllerBase
         {
             var sourcesResponse = await _mediaForge.GetSourcesAsync(cancellationToken).ConfigureAwait(false);
             var sources = ReadAllowedSources(sourcesResponse);
-            if (string.Equals(source, "all", StringComparison.OrdinalIgnoreCase))
+            if (searchesAllSources)
             {
                 var maximum = Math.Clamp(Plugin.Instance?.Configuration.MaxSearchSources ?? 8, 1, MaxKnownSources);
                 sources = sources.Take(maximum).ToList();

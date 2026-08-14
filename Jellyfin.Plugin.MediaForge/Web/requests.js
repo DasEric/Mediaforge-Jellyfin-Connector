@@ -3,7 +3,7 @@ export default function (view, params) {
   view.dataset.mfInitialized = '1';
   const api = typeof ApiClient !== 'undefined' ? ApiClient : window.ApiClient;
   const q = (name) => view.querySelector('[data-mf="' + name + '"]');
-  const state = { status: {}, detail: null, source: '', tab: 'search' };
+  const state = { status: {}, sources: [], detail: null, source: '', tab: 'search' };
   let mineTimer = null;
   let mineLoading = false;
   let searchGeneration = 0;
@@ -58,7 +58,8 @@ export default function (view, params) {
       if (!state.status.configured) notice('Das Plugin ist noch nicht mit MediaForge verbunden.', true);
       else if (state.status.maintenance) notice(state.status.maintenanceMessage || 'Anfragen sind derzeit deaktiviert.', true);
       const data = await call('Sources');
-      (data.sources || []).forEach((item) => {
+      state.sources = Array.isArray(data.sources) ? data.sources : [];
+      state.sources.forEach((item) => {
         const option = document.createElement('option'); option.value = item.id; option.textContent = item.label; q('source').appendChild(option);
       });
       await loadDiscover();
@@ -105,28 +106,48 @@ export default function (view, params) {
     q('results').hidden = !searching;
     if (!searching) q('results').innerHTML = '';
   }
-  q('query').addEventListener('input', () => { searchGeneration++; syncSearchMode(); });
+  q('query').addEventListener('input', () => { searchGeneration++; q('results').innerHTML = ''; syncSearchMode(); });
   q('search-form').addEventListener('submit', async (event) => {
     event.preventDefault();
     const generation = ++searchGeneration;
-    syncSearchMode(); notice(''); q('results').innerHTML = '<div class="mf-empty">Suche läuft…</div>';
-    try {
-      const data = await call('Search', { query: { query: q('query').value.trim(), source: q('source').value } });
+    const keyword = q('query').value.trim();
+    const selectedSource = q('source').value;
+    const maximum = Math.max(1, Math.min(32, Number(state.status.maxSearchSources) || 8));
+    const sources = selectedSource === 'all'
+      ? state.sources.slice(0, maximum)
+      : state.sources.filter((item) => item.id === selectedSource);
+    syncSearchMode(); notice('');
+    const host = q('results'); host.innerHTML = '';
+    const pending = document.createElement('div'); pending.className = 'mf-empty'; pending.dataset.mfSearchPending = '1'; pending.textContent = 'Weitere Quellen werden durchsucht…'; host.appendChild(pending);
+    if (!sources.length) { pending.remove(); notice('Keine freigegebene Quelle verfügbar.', true); return; }
+    let resultCount = 0; let errorCount = 0;
+    await Promise.all(sources.map(async (item) => {
+      let groups;
+      try {
+        const data = await call('Search', { query: { query: keyword, source: item.id } });
+        groups = data.groups || [];
+      } catch (error) {
+        groups = [{ source: item.id, label: item.label, error: error.message }];
+      }
       if (generation !== searchGeneration) return;
-      renderResults(data.groups || []);
-    } catch (error) { if (generation === searchGeneration) { q('results').innerHTML = ''; notice(error.message, true); } }
+      const rendered = appendResults(host, groups, pending);
+      resultCount += rendered.count; errorCount += rendered.errors;
+    }));
+    if (generation !== searchGeneration) return;
+    pending.remove();
+    if (!resultCount && !errorCount) host.innerHTML = '<div class="mf-empty">Keine Treffer gefunden.</div>';
   });
 
-  function renderResults(groups) {
-    const host = q('results'); host.innerHTML = ''; let count = 0; let hasError = false;
+  function appendResults(host, groups, before) {
+    let count = 0; let errors = 0;
     groups.forEach((group) => {
       const results = group.data && Array.isArray(group.data.results) ? group.data.results : [];
       results.forEach((item) => {
-        host.appendChild(createMediaCard(item, group.source, group.label)); count++;
+        host.insertBefore(createMediaCard(item, group.source, group.label), before); count++;
       });
-      if (group.error) { hasError = true; const box = document.createElement('div'); box.className = 'mf-notice mf-error'; box.textContent = group.label + ': ' + group.error; host.appendChild(box); }
+      if (group.error) { errors++; const box = document.createElement('div'); box.className = 'mf-notice mf-error'; box.textContent = group.label + ': ' + group.error; host.insertBefore(box, before); }
     });
-    if (!count && !hasError) host.innerHTML = '<div class="mf-empty">Keine Treffer gefunden.</div>';
+    return { count, errors };
   }
 
   function createMediaCard(item, sourceId, sourceLabel) {

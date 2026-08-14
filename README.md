@@ -7,7 +7,9 @@ movie and TV sources enabled in MediaForge.
   approve, or reject it in the admin tab.
 - Automatic mode: selected content is added to the MediaForge download queue
   immediately.
-- Search all enabled MediaForge sources or select individual sources.
+- Search all enabled MediaForge sources or select individual sources. Fast
+  sources appear immediately while the remaining sources continue in parallel;
+  each source uses the same 15-second deadline as MediaForge's UI.
 - Browse clickable New, Popular, and Movies rows from MediaForge immediately
   when opening the Requests page.
 - Automatically compare a title with Jellyfin's actual library and request
@@ -232,9 +234,11 @@ before committing source files:
   Jellyfin fetches them server-side through MediaForge's allowlisted and
   SSRF-protected image proxy without exposing either API token in a URL.
 - Existing-content decisions are made from Jellyfin's library, not from paths
-  or download flags reported by MediaForge. The decision is recalculated on
-  the server immediately before a request is stored and again when an
-  administrator approves a pending request.
+  or download flags reported by MediaForge. Matching uses provider IDs where
+  available and Jellyfin's normalized name/original-title search with
+  conservative year and remake handling. The decision is recalculated on the
+  server immediately before a request is stored and again when an administrator
+  approves a pending request.
 - The number of open requests is limited per user.
 - During automatic submission or administrator approval, an atomic status
   transition prevents the same request from being processed twice.

@@ -126,19 +126,24 @@ public sealed class JellyfinLibraryAvailabilityService
         {
             Recursive = true,
             IncludeItemTypes = [itemType],
-            NameContains = identity.Title.Trim(),
+            // SearchTerm is normalized by Jellyfin before it is compared with
+            // CleanName. NameContains is not, so a normal capitalized title
+            // such as "Dune" can otherwise miss the stored clean name "dune".
+            SearchTerm = identity.Title.Trim(),
             IsVirtualItem = false,
             EnableTotalRecordCount = false,
             Limit = MaximumTitleCandidates,
         });
         var candidates = byTitle.Where(item =>
         {
-            if (!string.Equals(NormalizeTitle(item.Name), normalizedTitle, StringComparison.Ordinal))
+            if (!TitleMatches(item, normalizedTitle))
             {
                 return false;
             }
 
-            if (identity.Year.HasValue && item.ProductionYear != identity.Year)
+            if (identity.Year.HasValue
+                && item.ProductionYear.HasValue
+                && item.ProductionYear != identity.Year)
             {
                 return false;
             }
@@ -150,15 +155,24 @@ public sealed class JellyfinLibraryAvailabilityService
                 && !string.Equals(pair.Value, value, StringComparison.OrdinalIgnoreCase));
         }).ToArray();
 
-        if (identity.Year.HasValue || candidates.Length == 1)
+        if (identity.Year.HasValue)
         {
-            return candidates;
+            var exactYear = candidates.Where(item => item.ProductionYear == identity.Year).ToArray();
+            if (exactYear.Length > 0)
+            {
+                return exactYear;
+            }
         }
 
-        // Without a year or provider id, duplicate titles are ambiguous and
-        // must not suppress a legitimate download.
-        return Array.Empty<BaseItem>();
+        // A single exact title remains useful when Jellyfin or MediaForge has
+        // no year metadata. Multiple undated remakes are ambiguous and must
+        // not suppress a legitimate download.
+        return candidates.Length == 1 ? candidates : Array.Empty<BaseItem>();
     }
+
+    private static bool TitleMatches(BaseItem item, string normalizedTitle)
+        => string.Equals(NormalizeTitle(item.Name), normalizedTitle, StringComparison.Ordinal)
+            || string.Equals(NormalizeTitle(item.OriginalTitle ?? string.Empty), normalizedTitle, StringComparison.Ordinal);
 }
 
 public sealed record LibraryMediaIdentity(

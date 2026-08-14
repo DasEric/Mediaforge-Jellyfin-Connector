@@ -10,6 +10,7 @@ public sealed class MediaForgeClient
 {
     private const int MaxResponseBytes = 16 * 1024 * 1024;
     private const int MaxImageBytes = 8 * 1024 * 1024;
+    private static readonly TimeSpan SearchTimeout = TimeSpan.FromSeconds(15);
     private static readonly HashSet<string> AllowedImageTypes = new(StringComparer.OrdinalIgnoreCase)
     {
         "image/jpeg",
@@ -38,7 +39,8 @@ public sealed class MediaForgeClient
             HttpMethod.Post,
             "api/v1/connector/search",
             new { keyword, site },
-            cancellationToken);
+            cancellationToken,
+            SearchTimeout);
 
     public Task<JsonElement> GetSeriesAsync(string url, CancellationToken cancellationToken)
         => GetWithUrlAsync("api/v1/connector/series", url, cancellationToken);
@@ -189,10 +191,11 @@ public sealed class MediaForgeClient
         HttpMethod method,
         string relativePath,
         object? body,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        TimeSpan? timeout = null)
     {
         using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeoutSource.CancelAfter(TimeSpan.FromSeconds(90));
+        timeoutSource.CancelAfter(timeout ?? TimeSpan.FromSeconds(90));
         var requestToken = timeoutSource.Token;
         var config = Plugin.Instance?.Configuration
             ?? throw new MediaForgeException(HttpStatusCode.ServiceUnavailable, "Plugin-Konfiguration ist nicht verfügbar.");

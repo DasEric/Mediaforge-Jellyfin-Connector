@@ -101,6 +101,8 @@ static void TestRequestPageContract()
     Assert(script.Contains("q('discover').hidden = searching", StringComparison.Ordinal), "Search results do not hide the discovery feed.");
     Assert(script.Contains("URL.createObjectURL", StringComparison.Ordinal), "Poster images are not loaded through authenticated blobs.");
     Assert(script.Contains("searchGeneration", StringComparison.Ordinal), "Stale searches can overwrite newer results.");
+    Assert(script.Contains("source: item.id", StringComparison.Ordinal), "All-source searches are not issued independently per MediaForge source.");
+    Assert(script.Contains("Weitere Quellen werden durchsucht", StringComparison.Ordinal), "Progressive search does not communicate outstanding sources.");
     Assert(script.Contains("detailGeneration", StringComparison.Ordinal), "Stale detail requests can overwrite the active dialog.");
     Assert(script.Contains("if (generation === detailGeneration) q('request').disabled = false", StringComparison.Ordinal), "An older request can mutate a newer dialog.");
     Assert(script.Contains("response.clone().json()", StringComparison.Ordinal), "Structured API errors are not shown to users.");
@@ -357,6 +359,9 @@ static void TestJellyfinLibraryQueries()
         true,
         new Dictionary<string, string>()));
     Assert(titleFallback.ItemExists, "The conservative Jellyfin title/year fallback did not find a movie.");
+    Assert(
+        queries.Any(query => query.SearchTerm == "Dune" && query.NameContains is null),
+        "Jellyfin title matching does not use its normalized SearchTerm query.");
 
     var conflictingId = availability.GetAvailability(new LibraryMediaIdentity(
         "Dune",
@@ -364,6 +369,23 @@ static void TestJellyfinLibraryQueries()
         true,
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["Imdb"] = "tt9999999" }));
     Assert(!conflictingId.ItemExists, "A conflicting Jellyfin provider ID was ignored during title fallback.");
+
+    movieResults =
+    [
+        new Movie
+        {
+            Id = Guid.NewGuid(),
+            Name = "Der Wüstenplanet",
+            OriginalTitle = "Dune",
+            ProductionYear = null,
+        },
+    ];
+    var originalTitleWithoutYear = availability.GetAvailability(new LibraryMediaIdentity(
+        "Dune",
+        2021,
+        true,
+        new Dictionary<string, string>()));
+    Assert(originalTitleWithoutYear.ItemExists, "A Jellyfin original title with missing year metadata was not detected.");
 
     movieResults =
     [
@@ -410,6 +432,14 @@ static void TestServiceRegistrationAndImageTypes()
     var allowed = (IReadOnlySet<string>)field.GetValue(null)!;
     Assert(allowed.Contains("image/jpeg") && allowed.Contains("image/png"), "Safe poster types are missing.");
     Assert(!allowed.Contains("image/svg+xml"), "Active SVG content must not be served from the Jellyfin origin.");
+
+    var searchTimeoutField = typeof(MediaForgeClient).GetField(
+        "SearchTimeout",
+        BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Missing per-source search timeout.");
+    Assert(
+        (TimeSpan)searchTimeoutField.GetValue(null)! == TimeSpan.FromSeconds(15),
+        "Jellyfin search does not use MediaForge's 15-second per-source deadline.");
 }
 
 static void TestQueueResponseContract()

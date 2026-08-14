@@ -1,6 +1,6 @@
 {
   "category": "General",
-  "changelog": "v0.3.0\n- Check existing movies, seasons, and episodes directly in the Jellyfin library, including another check at approval time\n- Restore feed and search posters through MediaForge's supported image proxy\n- Adopt MediaForge's public endpoint-scope and API-key APIs with 1.5 compatibility\n- Remove client-controlled Adult access and unsafe live view-function mutation\n- Reject disabled or malformed sources, active image formats, and invalid queue responses\n- Prevent stale search/detail responses and expose structured connector errors\n- Avoid duplicate episode lookups and expand Jellyfin library matching tests\n- Bound request persistence, recover interrupted handoffs, and keep progress polling after transient errors",
+  "changelog": "v0.3.1\n- Check existing movies, seasons, and episodes directly in the Jellyfin library, including another check at approval time\n- Restore feed and search posters through MediaForge's supported image proxy\n- Adopt MediaForge's public endpoint-scope and API-key APIs with 1.5 compatibility\n- Remove client-controlled Adult access and unsafe live view-function mutation\n- Reject disabled or malformed sources, active image formats, and invalid queue responses\n- Prevent stale search/detail responses and expose structured connector errors\n- Avoid duplicate episode lookups and expand Jellyfin library matching tests\n- Bound request persistence, recover interrupted handoffs, and keep progress polling after transient errors\n- Show per-source search results progressively with a 15-second deadline and fix Jellyfin normalized/original-title matching",
   "description": "Searches the movie and TV sources enabled in MediaForge directly from Jellyfin. Users can request downloads; administrators can approve them or enable automatic mode.",
   "guid": "2ea7f67d-8e4d-4c84-bd5a-a5bcd713bb23",
   "name": "MediaForge Requests",
@@ -8,7 +8,7 @@
   "owner": "MediaForge Jellyfin Connector contributors",
   "targetAbi": "10.11.0.0",
   "timestamp": "2026-08-14T00:00:00Z",
-  "version": "0.3.0.0",
+  "version": "0.3.1.0",
   "status": "Active",
   "autoUpdate": true
 }
