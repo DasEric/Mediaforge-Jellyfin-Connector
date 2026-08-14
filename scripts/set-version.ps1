@@ -35,8 +35,6 @@ Update-ExactText "Jellyfin.Plugin.MediaForge\meta.json" ('"version": "' + $oldFo
 Update-ExactText "Jellyfin.Plugin.MediaForge\meta.json" ("v$oldVersion\n") ("v$Version\n")
 Update-ExactText "Jellyfin.Plugin.MediaForge\PluginServiceRegistrator.cs" "Jellyfin-MediaForge-Requests/$oldVersion" "Jellyfin-MediaForge-Requests/$Version"
 Update-ExactText "MediaForge.Module\mediaforge_jellyfin_connector\__init__.py" ('MODULE_VERSION = "' + $oldVersion + '"') ('MODULE_VERSION = "' + $Version + '"')
-Update-ExactText "MediaForge.Module\mediaforge_jellyfin_connector\routes.py" ('"version": "' + $oldVersion + '"') ('"version": "' + $Version + '"')
-
 $versionInfo.version = $Version
 $versionInfo.versionFourPart = $newFourPart
 $json = @"

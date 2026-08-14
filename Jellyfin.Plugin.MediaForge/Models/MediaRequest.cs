@@ -84,6 +84,7 @@ public static class RequestStatuses
     public const string Processing = "processing";
     public const string Queued = "queued";
     public const string Completed = "completed";
+    public const string Available = "available";
     public const string Partial = "partial";
     public const string Cancelled = "cancelled";
     public const string Rejected = "rejected";

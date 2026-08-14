@@ -22,25 +22,29 @@ namespace Jellyfin.Plugin.MediaForge.Api;
 public sealed class MediaForgeRequestsController : ControllerBase
 {
     private const int MaxEpisodesPerRequest = 500;
+    private const int MaxKnownSources = 32;
     private static readonly TimeSpan RateWindow = TimeSpan.FromMinutes(1);
     private readonly MediaForgeClient _mediaForge;
     private readonly RequestStore _store;
     private readonly MediaAccessGrantStore _grants;
     private readonly UserRateLimiter _rateLimiter;
     private readonly SecretStore _secrets;
+    private readonly JellyfinLibraryAvailabilityService _libraryAvailability;
 
     public MediaForgeRequestsController(
         MediaForgeClient mediaForge,
         RequestStore store,
         MediaAccessGrantStore grants,
         UserRateLimiter rateLimiter,
-        SecretStore secrets)
+        SecretStore secrets,
+        JellyfinLibraryAvailabilityService libraryAvailability)
     {
         _mediaForge = mediaForge;
         _store = store;
         _grants = grants;
         _rateLimiter = rateLimiter;
         _secrets = secrets;
+        _libraryAvailability = libraryAvailability;
     }
 
     [HttpGet("InjectionScript")]
@@ -130,7 +134,7 @@ public sealed class MediaForgeRequestsController : ControllerBase
     [HttpGet("Image")]
     [Produces("image/jpeg", "image/png", "image/webp", "image/gif", "image/avif")]
     public async Task<IActionResult> Image(
-        [Required, MaxLength(2048)] string url,
+        [Required, MaxLength(4096)] string url,
         CancellationToken cancellationToken)
     {
         var (userId, _) = CurrentUser();
@@ -172,7 +176,12 @@ public sealed class MediaForgeRequestsController : ControllerBase
         {
             var sourcesResponse = await _mediaForge.GetSourcesAsync(cancellationToken).ConfigureAwait(false);
             var sources = ReadAllowedSources(sourcesResponse);
-            if (!string.Equals(source, "all", StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(source, "all", StringComparison.OrdinalIgnoreCase))
+            {
+                var maximum = Math.Clamp(Plugin.Instance?.Configuration.MaxSearchSources ?? 8, 1, MaxKnownSources);
+                sources = sources.Take(maximum).ToList();
+            }
+            else
             {
                 sources = sources.Where(item => string.Equals(item.Id, source, StringComparison.OrdinalIgnoreCase)).ToList();
             }
@@ -340,6 +349,14 @@ public sealed class MediaForgeRequestsController : ControllerBase
             return StatusCode(StatusCodes.Status429TooManyRequests, new
             {
                 error = $"Du kannst höchstens {maxPending} offene Anfragen gleichzeitig haben.",
+            });
+        }
+
+        if (addResult.StoreCapacityReached)
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+            {
+                error = "Der Anfragespeicher ist voll. Bitte abgeschlossene Anfragen bereinigen oder den Administrator informieren.",
             });
         }
 
@@ -517,6 +534,14 @@ public sealed class MediaForgeRequestsController : ControllerBase
             });
         }
 
+        if (addResult.StoreCapacityReached)
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+            {
+                error = "Der Anfragespeicher ist voll. Bitte abgeschlossene Anfragen bereinigen oder den Administrator informieren.",
+            });
+        }
+
         var stored = addResult.Request
             ?? throw new InvalidOperationException("Request store returned no result.");
         if (config?.AutoApproveRequests != true)
@@ -547,8 +572,12 @@ public sealed class MediaForgeRequestsController : ControllerBase
         }
 
         var (_, admin) = CurrentUser();
-        var result = await QueueRequestAsync(id, admin, cancellationToken).ConfigureAwait(false);
-        if (result.Status == RequestStatuses.Queued)
+        var result = await QueueRequestAsync(
+            id,
+            admin,
+            cancellationToken,
+            refreshAvailability: true).ConfigureAwait(false);
+        if (result.Status is RequestStatuses.Queued or RequestStatuses.Available)
         {
             return Ok(result);
         }
@@ -640,7 +669,11 @@ public sealed class MediaForgeRequestsController : ControllerBase
         }
     }
 
-    private async Task<MediaRequest> QueueRequestAsync(long id, string decidedBy, CancellationToken cancellationToken)
+    private async Task<MediaRequest> QueueRequestAsync(
+        long id,
+        string decidedBy,
+        CancellationToken cancellationToken,
+        bool refreshAvailability = false)
     {
         if (!await _store.TryClaimAsync(id, cancellationToken).ConfigureAwait(false))
         {
@@ -659,10 +692,43 @@ public sealed class MediaForgeRequestsController : ControllerBase
                 throw new MediaForgeException(HttpStatusCode.BadRequest, "Die Quelle dieser Anfrage ist nicht mehr freigegeben.");
             }
 
+            if (refreshAvailability)
+            {
+                var refreshedPlan = await BuildMissingPlanAsync(
+                    request.UserId,
+                    new AutomaticMediaRequest
+                    {
+                        Title = request.Title,
+                        SeriesUrl = request.SeriesUrl,
+                        Source = request.Source,
+                        MediaType = request.MediaType,
+                    },
+                    cancellationToken,
+                    requireGrant: false).ConfigureAwait(false);
+                if (refreshedPlan.MissingUrls.Count == 0)
+                {
+                    await _store.MarkAvailableAsync(id, decidedBy, CancellationToken.None).ConfigureAwait(false);
+                    return await _store.GetAsync(id, CancellationToken.None).ConfigureAwait(false) ?? request;
+                }
+
+                if (!await _store.TryUpdateProcessingPlanAsync(
+                        id,
+                        refreshedPlan.Title,
+                        refreshedPlan.IsMovie ? "movie" : "series",
+                        refreshedPlan.SelectionLabel,
+                        refreshedPlan.MissingUrls,
+                        CancellationToken.None).ConfigureAwait(false))
+                {
+                    return await _store.GetAsync(id, CancellationToken.None).ConfigureAwait(false) ?? request;
+                }
+
+                request = await _store.GetAsync(id, CancellationToken.None).ConfigureAwait(false) ?? request;
+            }
+
             var queueId = await _mediaForge.QueueAsync(request, cancellationToken).ConfigureAwait(false);
             await _store.MarkQueuedAsync(id, queueId, decidedBy, CancellationToken.None).ConfigureAwait(false);
         }
-        catch (Exception exception) when (exception is MediaForgeException or HttpRequestException or TaskCanceledException)
+        catch (Exception exception) when (exception is MediaForgeException or HttpRequestException or OperationCanceledException)
         {
             var error = exception is MediaForgeException mediaForgeException
                 ? mediaForgeException.Message
@@ -833,10 +899,12 @@ public sealed class MediaForgeRequestsController : ControllerBase
     private async Task<MissingMediaPlan> BuildMissingPlanAsync(
         string userId,
         AutomaticMediaRequest request,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool requireGrant = true)
     {
-        if (!_grants.IsGranted(userId, request.SeriesUrl, out var grantedSource)
-            || !string.Equals(grantedSource, request.Source, StringComparison.OrdinalIgnoreCase))
+        if (requireGrant
+            && (!_grants.IsGranted(userId, request.SeriesUrl, out var grantedSource)
+                || !string.Equals(grantedSource, request.Source, StringComparison.OrdinalIgnoreCase)))
         {
             throw new MediaForgeException(
                 HttpStatusCode.BadRequest,
@@ -860,6 +928,11 @@ public sealed class MediaForgeRequestsController : ControllerBase
         var isMovie = detail.TryGetProperty("is_movie", out var movieValue)
             ? movieValue.ValueKind == JsonValueKind.True
             : request.MediaType == "movie";
+        var libraryState = _libraryAvailability.GetAvailability(new LibraryMediaIdentity(
+            title,
+            ReadReleaseYear(detail),
+            isMovie,
+            ReadProviderIds(detail)));
         if (seasonsResponse.ValueKind != JsonValueKind.Object
             || !seasonsResponse.TryGetProperty("seasons", out var seasons)
             || seasons.ValueKind != JsonValueKind.Array)
@@ -880,11 +953,12 @@ public sealed class MediaForgeRequestsController : ControllerBase
 
         var missing = new List<string>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
-        var languages = new HashSet<string>(StringComparer.Ordinal);
+        HashSet<string>? languages = null;
         var total = 0;
         foreach (var season in seasonItems)
         {
             var seasonUrl = ReadJsonString(season, "url", 2048);
+            var seasonNumber = ReadOptionalInt(season, "season_number");
             if (!MediaAccessGrantStore.TryNormalizeUrl(seasonUrl, out var normalizedSeasonUrl))
             {
                 continue;
@@ -910,26 +984,46 @@ public sealed class MediaForgeRequestsController : ControllerBase
                 }
 
                 total++;
-                if (episode.TryGetProperty("languages", out var languageValues)
-                    && languageValues.ValueKind == JsonValueKind.Array)
+                var episodeNumber = ReadOptionalInt(episode, "episode_number");
+                var episodeSeason = ReadOptionalInt(episode, "season_number") ?? seasonNumber;
+                var alreadyAvailable = isMovie
+                    ? libraryState.ItemExists
+                    : episodeSeason.HasValue
+                        && episodeNumber.HasValue
+                        && libraryState.Episodes.Contains(new LibraryEpisodeKey(
+                            episodeSeason.Value,
+                            episodeNumber.Value));
+                if (!alreadyAvailable)
                 {
-                    foreach (var languageValue in languageValues.EnumerateArray().Take(32))
+                    var episodeLanguages = new HashSet<string>(StringComparer.Ordinal);
+                    if (episode.TryGetProperty("languages", out var languageValues)
+                        && languageValues.ValueKind == JsonValueKind.Array)
                     {
-                        if (languageValue.ValueKind == JsonValueKind.String)
+                        foreach (var languageValue in languageValues.EnumerateArray().Take(32))
                         {
-                            var language = languageValue.GetString()?.Trim() ?? string.Empty;
-                            if (language.Length is > 0 and <= 100 && !language.Any(char.IsControl))
+                            if (languageValue.ValueKind == JsonValueKind.String)
                             {
-                                languages.Add(language);
+                                var language = languageValue.GetString()?.Trim() ?? string.Empty;
+                                if (language.Length is > 0 and <= 100 && !language.Any(char.IsControl))
+                                {
+                                    episodeLanguages.Add(language);
+                                }
                             }
                         }
                     }
-                }
 
-                var downloaded = episode.TryGetProperty("downloaded", out var downloadedValue)
-                    && downloadedValue.ValueKind == JsonValueKind.True;
-                if (!downloaded)
-                {
+                    if (episodeLanguages.Count > 0)
+                    {
+                        if (languages is null)
+                        {
+                            languages = episodeLanguages;
+                        }
+                        else
+                        {
+                            languages.IntersectWith(episodeLanguages);
+                        }
+                    }
+
                     missing.Add(normalizedEpisodeUrl);
                     if (missing.Count > MaxEpisodesPerRequest)
                     {
@@ -959,7 +1053,7 @@ public sealed class MediaForgeRequestsController : ControllerBase
             total,
             missing,
             selectionLabel,
-            languages.Order(StringComparer.Ordinal).ToArray(),
+            languages is null ? Array.Empty<string>() : languages.Order(StringComparer.Ordinal).ToArray(),
             providers);
     }
 
@@ -1025,8 +1119,8 @@ public sealed class MediaForgeRequestsController : ControllerBase
         var allowlist = (config?.AllowedSources ?? string.Empty)
             .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var max = Math.Clamp(config?.MaxSearchSources ?? 8, 1, 32);
         var output = new List<SourceInfo>();
+        var seenSourceIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         if (response.ValueKind != JsonValueKind.Object
             || !response.TryGetProperty("sources", out var sources)
             || sources.ValueKind != JsonValueKind.Array)
@@ -1036,22 +1130,39 @@ public sealed class MediaForgeRequestsController : ControllerBase
 
         foreach (var item in sources.EnumerateArray())
         {
-            var id = item.TryGetProperty("id", out var idValue) ? idValue.GetString() ?? string.Empty : string.Empty;
-            var label = item.TryGetProperty("label", out var labelValue) ? labelValue.GetString() ?? id : id;
-            var enabled = !item.TryGetProperty("enabled", out var enabledValue) || enabledValue.ValueKind == JsonValueKind.True;
-            var adult = item.TryGetProperty("adult", out var adultValue) && adultValue.ValueKind == JsonValueKind.True;
-            if (string.IsNullOrWhiteSpace(id)
+            if (item.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            var id = item.TryGetProperty("id", out var idValue) && idValue.ValueKind == JsonValueKind.String
+                ? idValue.GetString() ?? string.Empty
+                : string.Empty;
+            var label = item.TryGetProperty("label", out var labelValue) && labelValue.ValueKind == JsonValueKind.String
+                ? labelValue.GetString() ?? id
+                : id;
+            var hasAdultFlag = item.TryGetProperty("adult", out var adultValue)
+                && adultValue.ValueKind is JsonValueKind.True or JsonValueKind.False;
+            var hasEnabledFlag = item.TryGetProperty("enabled", out var enabledValue);
+            var hasValidEnabledFlag = !hasEnabledFlag
+                || enabledValue.ValueKind is JsonValueKind.True or JsonValueKind.False;
+            var enabled = hasValidEnabledFlag && (!hasEnabledFlag || enabledValue.ValueKind == JsonValueKind.True);
+            var adult = hasAdultFlag && adultValue.ValueKind == JsonValueKind.True;
+            if (!hasAdultFlag
+                || !hasValidEnabledFlag
+                || string.IsNullOrWhiteSpace(id)
                 || id.Length > 80
                 || id.Any(char.IsControl)
                 || !enabled
-                || (adult && config?.AllowAdultSources != true)
-                || (allowlist.Count > 0 && !allowlist.Contains(id)))
+                || adult
+                || (allowlist.Count > 0 && !allowlist.Contains(id))
+                || !seenSourceIds.Add(id))
             {
                 continue;
             }
 
             output.Add(new SourceInfo(id, SafeIdentity(label), adult));
-            if (output.Count >= max)
+            if (output.Count >= MaxKnownSources)
             {
                 break;
             }
@@ -1094,7 +1205,7 @@ public sealed class MediaForgeRequestsController : ControllerBase
             }
 
             var posterUrl = ReadJsonString(item, "poster_url", 4096);
-            if (!posterUrl.StartsWith("/api/v1/connector/image?", StringComparison.Ordinal))
+            if (!TryReadMediaForgeImageUrl(posterUrl, out _))
             {
                 posterUrl = string.Empty;
             }
@@ -1133,21 +1244,109 @@ public sealed class MediaForgeRequestsController : ControllerBase
         return text.Length <= maximum && !text.Any(char.IsControl) ? text.Trim() : string.Empty;
     }
 
+    private static int? ReadOptionalInt(JsonElement item, string name)
+    {
+        if (!item.TryGetProperty(name, out var value))
+        {
+            return null;
+        }
+
+        if (value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var numeric))
+        {
+            return numeric is >= 0 and <= 100000 ? numeric : null;
+        }
+
+        if (value.ValueKind == JsonValueKind.String
+            && int.TryParse(value.GetString(), out numeric))
+        {
+            return numeric is >= 0 and <= 100000 ? numeric : null;
+        }
+
+        return null;
+    }
+
+    private static int? ReadReleaseYear(JsonElement detail)
+    {
+        foreach (var field in new[] { "release_year", "year" })
+        {
+            var value = ReadJsonString(detail, field, 32);
+            if (value.Length >= 4
+                && int.TryParse(value.AsSpan(0, 4), out var year)
+                && year is >= 1800 and <= 3000)
+            {
+                return year;
+            }
+        }
+
+        return null;
+    }
+
+    private static IReadOnlyDictionary<string, string> ReadProviderIds(JsonElement detail)
+    {
+        var output = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        AddProviderId(output, "Imdb", ReadJsonString(detail, "imdb_id", 100));
+        AddProviderId(output, "Tmdb", ReadJsonString(detail, "tmdb_id", 100));
+        AddProviderId(output, "Tvdb", ReadJsonString(detail, "tvdb_id", 100));
+        ReadNestedProviderIds(detail, "provider_ids", output);
+        ReadNestedProviderIds(detail, "external_ids", output);
+        return output;
+    }
+
+    private static void ReadNestedProviderIds(
+        JsonElement detail,
+        string field,
+        IDictionary<string, string> output)
+    {
+        if (!detail.TryGetProperty(field, out var ids) || ids.ValueKind != JsonValueKind.Object)
+        {
+            return;
+        }
+
+        foreach (var pair in new[]
+        {
+            (Json: "imdb_id", Jellyfin: "Imdb"),
+            (Json: "tmdb_id", Jellyfin: "Tmdb"),
+            (Json: "tvdb_id", Jellyfin: "Tvdb"),
+            (Json: "Imdb", Jellyfin: "Imdb"),
+            (Json: "Tmdb", Jellyfin: "Tmdb"),
+            (Json: "Tvdb", Jellyfin: "Tvdb"),
+        })
+        {
+            AddProviderId(output, pair.Jellyfin, ReadJsonString(ids, pair.Json, 100));
+        }
+    }
+
+    private static void AddProviderId(IDictionary<string, string> output, string provider, string value)
+    {
+        if (!string.IsNullOrWhiteSpace(value)
+            && value.Length <= 100
+            && !value.Any(char.IsControl))
+        {
+            output.TryAdd(provider, value.Trim());
+        }
+    }
+
     private static bool TryReadMediaForgeImageUrl(string value, out string normalized)
     {
         normalized = string.Empty;
         if (string.IsNullOrWhiteSpace(value)
             || value.Length > 4096
-            || !value.StartsWith("/api/v1/connector/image?", StringComparison.Ordinal))
+            || !value.StartsWith("/api/img?", StringComparison.Ordinal))
         {
             return false;
         }
 
         var query = value[(value.IndexOf('?', StringComparison.Ordinal) + 1)..];
         string? rawUrl = null;
+        var pairs = query.Split('&');
+        if (pairs.Length != 1)
+        {
+            return false;
+        }
+
         try
         {
-            foreach (var pair in query.Split('&', StringSplitOptions.RemoveEmptyEntries))
+            foreach (var pair in pairs)
             {
                 var separator = pair.IndexOf('=', StringComparison.Ordinal);
                 var name = Uri.UnescapeDataString(separator >= 0 ? pair[..separator] : pair);
@@ -1204,7 +1403,7 @@ public sealed class MediaForgeRequestsController : ControllerBase
             var percent = ReadBoundedDouble(item, "percent", 0, 100);
             var phase = item.TryGetProperty("phase", out var phaseValue)
                 && phaseValue.ValueKind == JsonValueKind.String
-                && phaseValue.GetString() is "download" or "ffmpeg" or "upscaling" or "move"
+                && phaseValue.GetString() is "download" or "ffmpeg"
                     ? phaseValue.GetString()!
                     : "download";
             output.Add(new ProgressInfo(queueId, status, current, total, percent, phase));

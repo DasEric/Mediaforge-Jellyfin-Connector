@@ -38,14 +38,14 @@ $manifest = @(
     [ordered]@{
         guid = "2ea7f67d-8e4d-4c84-bd5a-a5bcd713bb23"
         name = "MediaForge Requests"
-        description = "Durchsucht MediaForge nach Filmen und Serien. Benutzer koennen Downloads anfragen, ausstehende Anfragen zurueckziehen und den Download-Fortschritt sehen."
-        overview = "MediaForge-Suche und Download-Anfragen fuer alle Jellyfin-Benutzer"
+        description = "Search MediaForge for movies and series directly in Jellyfin, submit requests, withdraw pending requests, and monitor download progress."
+        overview = "MediaForge search and download requests for all Jellyfin users"
         owner = "MediaForge Jellyfin Connector contributors"
         category = "General"
         versions = @(
             [ordered]@{
                 version = $versionFourPart
-                changelog = "Repository-Updates, Download-Fortschritt, Rueckzug ausstehender Anfragen und zusaetzliche Sicherheitshaertungen."
+                changelog = "Jellyfin library availability checks, restored posters, official MediaForge scope registration, disabled-source enforcement, and additional security hardening."
                 targetAbi = $targetAbi
                 sourceUrl = $sourceUrl
                 checksum = $checksum

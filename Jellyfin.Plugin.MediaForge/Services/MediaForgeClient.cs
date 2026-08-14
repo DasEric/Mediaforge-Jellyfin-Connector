@@ -10,6 +10,14 @@ public sealed class MediaForgeClient
 {
     private const int MaxResponseBytes = 16 * 1024 * 1024;
     private const int MaxImageBytes = 8 * 1024 * 1024;
+    private static readonly HashSet<string> AllowedImageTypes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+        "image/gif",
+        "image/avif",
+    };
     private readonly HttpClient _httpClient;
     private readonly SecretStore _secrets;
 
@@ -23,17 +31,13 @@ public sealed class MediaForgeClient
         => SendAsync(HttpMethod.Get, "api/v1/connector/health", null, cancellationToken);
 
     public Task<JsonElement> GetSourcesAsync(CancellationToken cancellationToken)
-        => SendAsync(
-            HttpMethod.Get,
-            $"api/v1/connector/sources?include_adult={AllowAdultSources().ToString().ToLowerInvariant()}",
-            null,
-            cancellationToken);
+        => SendAsync(HttpMethod.Get, "api/v1/connector/sources", null, cancellationToken);
 
     public Task<JsonElement> SearchAsync(string keyword, string site, CancellationToken cancellationToken)
         => SendAsync(
             HttpMethod.Post,
             "api/v1/connector/search",
-            new { keyword, site, include_adult = AllowAdultSources() },
+            new { keyword, site },
             cancellationToken);
 
     public Task<JsonElement> GetSeriesAsync(string url, CancellationToken cancellationToken)
@@ -56,6 +60,27 @@ public sealed class MediaForgeClient
 
     public async Task<MediaForgeImage> GetImageAsync(string url, CancellationToken cancellationToken)
     {
+        var encodedUrl = Uri.EscapeDataString(url);
+        try
+        {
+            return await GetImageFromPathAsync(
+                "api/img?url=" + encodedUrl,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (MediaForgeException exception) when (exception.StatusCode == HttpStatusCode.BadGateway)
+        {
+            // MediaForge 1.5 session-protects /api/img. The module fallback
+            // exposes the same hardened core proxy behind scoped API-key auth.
+            return await GetImageFromPathAsync(
+                "api/v1/connector/image?url=" + encodedUrl,
+                cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private async Task<MediaForgeImage> GetImageFromPathAsync(
+        string path,
+        CancellationToken cancellationToken)
+    {
         using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutSource.CancelAfter(TimeSpan.FromSeconds(30));
         var requestToken = timeoutSource.Token;
@@ -67,7 +92,6 @@ public sealed class MediaForgeClient
             throw new MediaForgeException(HttpStatusCode.ServiceUnavailable, "In Jellyfin ist kein gültiger MediaForge-API-Schlüssel konfiguriert.");
         }
 
-        var path = "api/v1/connector/image?url=" + Uri.EscapeDataString(url);
         using var request = new HttpRequestMessage(HttpMethod.Get, BuildUri(config.MediaForgeUrl, path));
         request.Headers.Add("X-Api-Key", apiKey);
 
@@ -83,7 +107,7 @@ public sealed class MediaForgeClient
             }
 
             var mediaType = response.Content.Headers.ContentType?.MediaType ?? string.Empty;
-            if (!mediaType.StartsWith("image/", StringComparison.OrdinalIgnoreCase)
+            if (!AllowedImageTypes.Contains(mediaType)
                 || response.Content.Headers.ContentLength > MaxImageBytes)
             {
                 throw new MediaForgeException(HttpStatusCode.BadGateway, "MediaForge hat keine gültige Bildantwort geliefert.");
@@ -120,7 +144,7 @@ public sealed class MediaForgeClient
         }
     }
 
-    public async Task<long?> QueueAsync(MediaRequest request, CancellationToken cancellationToken)
+    public async Task<long> QueueAsync(MediaRequest request, CancellationToken cancellationToken)
     {
         var response = await SendAsync(
             HttpMethod.Post,
@@ -138,25 +162,28 @@ public sealed class MediaForgeClient
 
         if (response.TryGetProperty("queue_id", out var queueId))
         {
-            if (queueId.ValueKind == JsonValueKind.Number && queueId.TryGetInt64(out var numeric))
+            if (queueId.ValueKind == JsonValueKind.Number
+                && queueId.TryGetInt64(out var numeric)
+                && numeric > 0)
             {
                 return numeric;
             }
 
-            if (queueId.ValueKind == JsonValueKind.String && long.TryParse(queueId.GetString(), out numeric))
+            if (queueId.ValueKind == JsonValueKind.String
+                && long.TryParse(queueId.GetString(), out numeric)
+                && numeric > 0)
             {
                 return numeric;
             }
         }
 
-        return null;
+        throw new MediaForgeException(
+            HttpStatusCode.BadGateway,
+            "MediaForge hat keine gültige Warteschlangen-ID zurückgegeben.");
     }
 
     private Task<JsonElement> GetWithUrlAsync(string path, string url, CancellationToken cancellationToken)
         => SendAsync(HttpMethod.Get, $"{path}?url={Uri.EscapeDataString(url)}", null, cancellationToken);
-
-    private static bool AllowAdultSources()
-        => Plugin.Instance?.Configuration.AllowAdultSources == true;
 
     private async Task<JsonElement> SendAsync(
         HttpMethod method,

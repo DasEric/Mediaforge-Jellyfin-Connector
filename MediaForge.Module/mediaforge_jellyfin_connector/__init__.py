@@ -5,6 +5,8 @@ provider support, source toggles, language handling and queue validation in
 one place instead of slowly reimplementing MediaForge in a second project.
 """
 
+import inspect
+
 from ..registry import module_setting_key, register_thirdparty
 from .routes import create_blueprint
 
@@ -19,10 +21,10 @@ MODULE_DESCRIPTION_DE = (
 )
 MODULE_AUTHOR = "MediaForge Jellyfin Connector contributors"
 MODULE_ENABLED_DEFAULT = True
-MODULE_VERSION = "0.2.8"
+MODULE_VERSION = "0.3.0"
 MODULE_API_VERSION = 1
 MODULE_MIN_APP_VERSION = "1.5.0"
-MODULE_MAX_APP_VERSION = ""
+MODULE_MAX_APP_VERSION = "1.6.999"
 MODULE_REQUIREMENTS = ()
 MODULE_ID = "mediaforge_jellyfin_connector"
 MODULE_HOMEPAGE = ""
@@ -33,27 +35,39 @@ _SETTING_KEY = module_setting_key(MODULE_ID, "enabled")
 
 def register(app) -> None:
     """Register the connector routes before MediaForge applies auth wrappers."""
-    blueprint, endpoint_scopes = create_blueprint(app, _SETTING_KEY)
+    blueprint, endpoint_scopes = create_blueprint(app, _SETTING_KEY, MODULE_VERSION)
     app.register_blueprint(blueprint)
 
-    # MediaForge builds its API-key exemption and OpenAPI document from this
-    # map after third-party discovery.  Registering here therefore gives these
-    # endpoints the exact same X-Api-Key authentication as the built-in v1 API.
-    from ...routes.v1_api import _V1_ENDPOINT_SCOPES
+    # MediaForge 1.6+ owns and validates module scopes through its public
+    # registry. Keep the narrow fallback because this module deliberately
+    # retains MediaForge 1.5.0 as its minimum supported application version.
+    try:
+        from ...routes.v1_api import register_v1_endpoint_scopes
+    except ImportError:  # MediaForge 1.5 compatibility
+        from ...routes.v1_api import _V1_ENDPOINT_SCOPES
 
-    _V1_ENDPOINT_SCOPES.update(endpoint_scopes)
+        _V1_ENDPOINT_SCOPES.update(endpoint_scopes)
+    else:
+        register_v1_endpoint_scopes(
+            MODULE_ID,
+            endpoint_scopes,
+            blueprint="mediaforge_jellyfin_connector",
+        )
 
-    register_thirdparty(
-        item_id=MODULE_ID,
-        label=MODULE_NAME,
-        enabled_setting_key=_SETTING_KEY,
-        description=MODULE_DESCRIPTION,
-        enable_label="Enable Jellyfin Connector",
-        enable_desc=(
+    registration = {
+        "item_id": MODULE_ID,
+        "label": MODULE_NAME,
+        "enabled_setting_key": _SETTING_KEY,
+        "description": MODULE_DESCRIPTION,
+        "enable_label": "Enable Jellyfin Connector",
+        "enable_desc": (
             "Allows a Jellyfin server with a scoped MediaForge API key to "
             "search the enabled sources and add approved downloads to the queue."
         ),
-        badges=[("API", "#00a4dc"), ("Jellyfin", "#8b5cf6")],
-        section="system",
-        settings_host="settings",
-    )
+        "badges": [("API", "#00a4dc"), ("Jellyfin", "#8b5cf6")],
+        "section": "system",
+        "settings_host": "settings",
+    }
+    if "blueprint" in inspect.signature(register_thirdparty).parameters:
+        registration["blueprint"] = "mediaforge_jellyfin_connector"
+    register_thirdparty(**registration)

@@ -29,7 +29,6 @@ export default function (view) {
       byId('mfMaintenance').checked = config.MaintenanceMode === true;
       byId('mfMaintenanceMessage').value = config.MaintenanceMessage || '';
       byId('mfMaxPending').value = config.MaxPendingRequestsPerUser || 10;
-      byId('mfAdult').checked = config.AllowAdultSources === true;
       byId('mfAllowedSources').value = config.AllowedSources || '';
       byId('mfDefaultLanguage').value = config.DefaultLanguage || 'German Dub';
       byId('mfDefaultProvider').value = config.DefaultProvider || 'VOE';
@@ -51,7 +50,6 @@ export default function (view) {
       config.MaintenanceMode = byId('mfMaintenance').checked;
       config.MaintenanceMessage = byId('mfMaintenanceMessage').value.trim();
       config.MaxPendingRequestsPerUser = Math.max(1, Math.min(100, parseInt(byId('mfMaxPending').value, 10) || 10));
-      config.AllowAdultSources = byId('mfAdult').checked;
       config.AllowedSources = byId('mfAllowedSources').value.trim();
       config.DefaultLanguage = byId('mfDefaultLanguage').value.trim() || 'German Dub';
       config.DefaultProvider = byId('mfDefaultProvider').value.trim() || 'VOE';

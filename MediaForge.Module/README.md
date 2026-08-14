@@ -5,6 +5,10 @@ searching, resolving titles, seasons, and episodes, and queueing downloads. It
 uses the same handlers as the MediaForge Web UI internally, so the sources,
 providers, and download settings enabled in MediaForge automatically apply.
 
+Adult sources remain subject to MediaForge's central age gate. API-key clients
+cannot opt into adult results. Poster references use MediaForge's `/api/img`
+proxy; the connector keeps a scoped compatibility route for MediaForge 1.5.
+
 ## Installation
 
 1. Copy the `mediaforge_jellyfin_connector` directory to
@@ -30,11 +34,16 @@ If the module card is missing, verify the exact directory layout:
 ```
 
 There must not be a second nested `mediaforge_jellyfin_connector` directory.
-After correcting a manual installation, restart MediaForge or use the Module
-Manager's refresh function. The MediaForge log will report an import or
-compatibility error if registration still fails.
+After correcting a manual installation, restart MediaForge. MediaForge 1.6 can
+also apply the registration safely through the Module Manager's refresh
+function; MediaForge 1.5 requires a restart. The MediaForge log will report an
+import or compatibility error if registration still fails.
 
 After saving, the key is stored in encrypted form by the Jellyfin plugin and is
 never returned to a browser. The module validates every submitted media URL
 against MediaForge's own provider registry, limits field lengths, and accepts
 only the expected JSON fields when queueing a download.
+
+The companion Jellyfin plugin checks existing films and episodes directly in
+the Jellyfin library. This MediaForge module therefore performs no filesystem
+or provider-page `downloaded` correction of its own.

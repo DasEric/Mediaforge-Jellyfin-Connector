@@ -13,6 +13,8 @@ public sealed class RequestStore
     private const int MaxStoredRequests = 20_000;
     private const long MaxStoreBytes = 64L * 1024 * 1024;
     private readonly string _path;
+    private readonly int _maxStoredRequests;
+    private readonly long _maxStoreBytes;
     private readonly SemaphoreSlim _lock = new(1, 1);
     private readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -26,10 +28,17 @@ public sealed class RequestStore
     {
     }
 
-    internal RequestStore(string dataPath)
+    internal RequestStore(
+        string dataPath,
+        int maxStoredRequests = MaxStoredRequests,
+        long maxStoreBytes = MaxStoreBytes)
     {
+        ArgumentOutOfRangeException.ThrowIfLessThan(maxStoredRequests, 1);
+        ArgumentOutOfRangeException.ThrowIfLessThan(maxStoreBytes, 1);
         Directory.CreateDirectory(dataPath);
         _path = Path.Combine(dataPath, "requests.json");
+        _maxStoredRequests = maxStoredRequests;
+        _maxStoreBytes = maxStoreBytes;
         _document = Load();
     }
 
@@ -52,15 +61,21 @@ public sealed class RequestStore
                 && IsOpen(item));
             if (duplicate is not null)
             {
-                return new AddRequestResult(null, Clone(duplicate), false);
+                return new AddRequestResult(null, Clone(duplicate), false, false);
             }
 
             if (_document.Requests.Count(item => item.UserId == userId && IsOpen(item)) >= maxOpen)
             {
-                return new AddRequestResult(null, null, true);
+                return new AddRequestResult(null, null, true, false);
             }
 
             var document = CloneDocument();
+            PruneCompleted(document, _maxStoredRequests - 1);
+            if (document.Requests.Count >= _maxStoredRequests)
+            {
+                return new AddRequestResult(null, null, false, true);
+            }
+
             var item = new MediaRequest
             {
                 Id = document.NextId++,
@@ -79,10 +94,9 @@ public sealed class RequestStore
                 CreatedUtc = DateTime.UtcNow,
             };
             document.Requests.Add(item);
-            PruneCompleted(document);
             await SaveLockedAsync(document, cancellationToken).ConfigureAwait(false);
             _document = document;
-            return new AddRequestResult(Clone(item), null, false);
+            return new AddRequestResult(Clone(item), null, false, false);
         }
         finally
         {
@@ -171,6 +185,42 @@ public sealed class RequestStore
 
     public Task MarkFailedAsync(long id, string error, string decidedBy, CancellationToken cancellationToken)
         => UpdateDecisionAsync(id, RequestStatuses.Failed, decidedBy, null, error, cancellationToken);
+
+    public Task MarkAvailableAsync(long id, string decidedBy, CancellationToken cancellationToken)
+        => UpdateDecisionAsync(id, RequestStatuses.Available, decidedBy, null, null, cancellationToken);
+
+    public async Task<bool> TryUpdateProcessingPlanAsync(
+        long id,
+        string title,
+        string mediaType,
+        string selectionLabel,
+        IReadOnlyList<string> episodes,
+        CancellationToken cancellationToken)
+    {
+        await _lock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var current = _document.Requests.FirstOrDefault(candidate => candidate.Id == id);
+            if (current?.Status != RequestStatuses.Processing)
+            {
+                return false;
+            }
+
+            var document = CloneDocument();
+            var item = document.Requests.First(candidate => candidate.Id == id);
+            item.Title = title;
+            item.MediaType = mediaType;
+            item.SelectionLabel = selectionLabel;
+            item.EpisodesJson = JsonSerializer.Serialize(episodes);
+            await SaveLockedAsync(document, cancellationToken).ConfigureAwait(false);
+            _document = document;
+            return true;
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
 
     public async Task<bool> TryRejectAsync(long id, string reason, string decidedBy, CancellationToken cancellationToken)
     {
@@ -321,7 +371,7 @@ public sealed class RequestStore
 
         try
         {
-            if (new FileInfo(_path).Length > MaxStoreBytes)
+            if (new FileInfo(_path).Length > _maxStoreBytes)
             {
                 throw new JsonException("Request store exceeds the safe size limit.");
             }
@@ -374,6 +424,11 @@ public sealed class RequestStore
                 FileOptions.Asynchronous | FileOptions.WriteThrough))
             {
                 await JsonSerializer.SerializeAsync(stream, document, _jsonOptions, cancellationToken).ConfigureAwait(false);
+                if (stream.Length > _maxStoreBytes)
+                {
+                    throw new IOException("Request store exceeds the safe size limit.");
+                }
+
                 await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
                 stream.Flush(flushToDisk: true);
             }
@@ -398,9 +453,9 @@ public sealed class RequestStore
         => JsonSerializer.Deserialize<StoreDocument>(JsonSerializer.Serialize(_document, _jsonOptions), _jsonOptions)
             ?? throw new InvalidOperationException("Request store could not be cloned.");
 
-    private static void PruneCompleted(StoreDocument document)
+    private static void PruneCompleted(StoreDocument document, int targetCount)
     {
-        var excess = document.Requests.Count - MaxStoredRequests;
+        var excess = document.Requests.Count - targetCount;
         if (excess <= 0)
         {
             return;
@@ -436,7 +491,11 @@ public sealed class RequestStore
 }
 
 /// <summary>Atomic result of checking duplicate/limit constraints and adding a request.</summary>
-public sealed record AddRequestResult(MediaRequest? Request, MediaRequest? Duplicate, bool LimitReached);
+public sealed record AddRequestResult(
+    MediaRequest? Request,
+    MediaRequest? Duplicate,
+    bool LimitReached,
+    bool StoreCapacityReached);
 
 /// <summary>Result of a user attempting to withdraw an unapproved request.</summary>
 public enum WithdrawRequestResult

@@ -6,6 +6,8 @@ export default function (view, params) {
   const state = { status: {}, detail: null, source: '', tab: 'search' };
   let mineTimer = null;
   let mineLoading = false;
+  let searchGeneration = 0;
+  let detailGeneration = 0;
 
   function url(path, query) {
     let value = api.getUrl('MediaForgeRequests/' + path);
@@ -20,11 +22,19 @@ export default function (view, params) {
       request.data = JSON.stringify(opts.body);
     }
     try { return await api.fetch(request); }
-    catch (error) {
-      let message = error && (error.message || error.statusText) || 'Anfrage fehlgeschlagen.';
-      if (error && error.responseJSON && error.responseJSON.error) message = error.responseJSON.error;
-      throw new Error(message);
+    catch (error) { throw new Error(await readErrorMessage(error)); }
+  }
+  async function readErrorMessage(error) {
+    const response = error && error.response ? error.response : error;
+    const responseJson = error && error.responseJSON || response && response.responseJSON;
+    if (responseJson && typeof responseJson.error === 'string' && responseJson.error.trim()) return responseJson.error;
+    if (response && typeof response.clone === 'function') {
+      try {
+        const payload = await response.clone().json();
+        if (payload && typeof payload.error === 'string' && payload.error.trim()) return payload.error;
+      } catch (_) { /* the response was empty or not JSON */ }
     }
+    return error && (error.message || error.statusText) || response && response.statusText || 'Anfrage fehlgeschlagen.';
   }
   function notice(message, error) {
     q('notice').innerHTML = '';
@@ -95,13 +105,16 @@ export default function (view, params) {
     q('results').hidden = !searching;
     if (!searching) q('results').innerHTML = '';
   }
-  q('query').addEventListener('input', syncSearchMode);
+  q('query').addEventListener('input', () => { searchGeneration++; syncSearchMode(); });
   q('search-form').addEventListener('submit', async (event) => {
-    event.preventDefault(); syncSearchMode(); notice(''); q('results').innerHTML = '<div class="mf-empty">Suche läuft…</div>';
+    event.preventDefault();
+    const generation = ++searchGeneration;
+    syncSearchMode(); notice(''); q('results').innerHTML = '<div class="mf-empty">Suche läuft…</div>';
     try {
       const data = await call('Search', { query: { query: q('query').value.trim(), source: q('source').value } });
+      if (generation !== searchGeneration) return;
       renderResults(data.groups || []);
-    } catch (error) { q('results').innerHTML = ''; notice(error.message, true); }
+    } catch (error) { if (generation === searchGeneration) { q('results').innerHTML = ''; notice(error.message, true); } }
   });
 
   function renderResults(groups) {
@@ -156,12 +169,14 @@ export default function (view, params) {
   async function openDetail(item, source) {
     const rawUrl = item.url || item.link || item.series_url;
     if (!rawUrl) return notice('Der Treffer enthält keine MediaForge-URL.', true);
+    const generation = ++detailGeneration;
     state.source = source; state.detail = null; q('overlay').style.display = 'flex'; q('detail-title').textContent = item.title || item.name || 'Laden…'; q('description').textContent = 'Vorhandene Staffeln und Episoden werden geprüft…'; q('plan').innerHTML = '<div class="mf-empty">MediaForge prüft den Bestand…</div>'; q('request').disabled = true;
     setOptions(q('language'), [state.status.defaultLanguage || 'German Dub'], state.status.defaultLanguage);
     setOptions(q('provider'), [state.status.defaultProvider || 'VOE'], state.status.defaultProvider);
     try {
       const payload = { title: item.title || item.name || 'Unbekannter Titel', seriesUrl: rawUrl, source, mediaType: item.media_type === 'movie' ? 'movie' : 'series' };
       const plan = await call('Requests/Plan', { method: 'POST', body: payload });
+      if (generation !== detailGeneration) return;
       state.detail = Object.assign(payload, { title: plan.title || payload.title, plan });
       q('detail-title').textContent = state.detail.title;
       q('description').textContent = plan.description || 'Keine Beschreibung verfügbar.';
@@ -185,18 +200,22 @@ export default function (view, params) {
           : 'Alle ' + plan.total_count + ' Episoden sind bereits vorhanden. Es wird nichts eingereiht.';
       }
       q('plan').appendChild(summary);
-    } catch (error) { q('description').textContent = error.message; q('plan').innerHTML = ''; }
+    } catch (error) { if (generation === detailGeneration) { q('description').textContent = error.message; q('plan').innerHTML = ''; } }
   }
   function setOptions(select, values, preferred) { const clean = Array.from(new Set(values.filter(Boolean))); select.innerHTML = ''; clean.forEach((value) => { const option = document.createElement('option'); option.value = value; option.textContent = value; select.appendChild(option); }); if (clean.includes(preferred)) select.value = preferred; }
   q('request').addEventListener('click', async () => {
     if (!state.detail || !state.detail.plan || !state.detail.plan.missing_count) return;
+    const detail = state.detail;
+    const generation = detailGeneration;
     q('request').disabled = true;
     try {
-      const payload = { title: state.detail.title, seriesUrl: state.detail.seriesUrl, source: state.detail.source, mediaType: state.detail.plan.is_movie ? 'movie' : 'series', language: q('language').value, provider: q('provider').value, upscale: q('upscale').checked };
-      const result = await call('Requests/Automatic', { method: 'POST', body: payload }); closeDetail(); notice(result.status === 'queued' ? 'Nur die fehlenden Inhalte wurden direkt an MediaForge übergeben.' : 'Die Anfrage für die fehlenden Inhalte wurde an den Administrator gesendet.'); switchTab('mine');
-    } catch (error) { notice(error.message, true); } finally { q('request').disabled = false; }
+      const payload = { title: detail.title, seriesUrl: detail.seriesUrl, source: detail.source, mediaType: detail.plan.is_movie ? 'movie' : 'series', language: q('language').value, provider: q('provider').value, upscale: q('upscale').checked };
+      const result = await call('Requests/Automatic', { method: 'POST', body: payload });
+      const message = result.status === 'queued' ? 'Nur die fehlenden Inhalte wurden direkt an MediaForge übergeben.' : 'Die Anfrage für die fehlenden Inhalte wurde an den Administrator gesendet.';
+      if (generation === detailGeneration) { closeDetail(); notice(message); switchTab('mine'); } else { notice(message); }
+    } catch (error) { notice(error.message, true); } finally { if (generation === detailGeneration) q('request').disabled = false; }
   });
-  function closeDetail() { q('overlay').style.display = 'none'; }
+  function closeDetail() { detailGeneration++; state.detail = null; q('overlay').style.display = 'none'; }
   q('close').addEventListener('click', closeDetail); q('cancel').addEventListener('click', closeDetail); q('overlay').addEventListener('click', (e) => { if (e.target === q('overlay')) closeDetail(); });
 
   async function loadMine() {
@@ -212,7 +231,8 @@ export default function (view, params) {
       const byQueue = new Map(progress.map((item) => [item.queue_id, item]));
       renderRequests(q('mine'), items, false, byQueue);
       if (mineTimer) clearTimeout(mineTimer);
-      const hasActiveDownload = progress.some((item) => item.status === 'queued' || item.status === 'running');
+      const hasActiveDownload = items.some((item) => item.status === 'queued')
+        || progress.some((item) => item.status === 'queued' || item.status === 'running');
       if (view.isConnected && state.tab === 'mine' && hasActiveDownload) {
         mineTimer = setTimeout(loadMine, 5000);
       }
@@ -241,8 +261,8 @@ export default function (view, params) {
   async function decide(id, action) { try { await call('Admin/Requests/' + id + '/' + action, { method: 'POST', body: action === 'Reject' ? { reason: 'Vom Administrator abgelehnt.' } : {} }); await loadAdmin(); } catch (error) { notice(error.message, true); } }
   async function withdrawRequest(id) { if (!window.confirm('Diese noch nicht freigegebene Anfrage zurückziehen?')) return; try { await call('Requests/' + id, { method: 'DELETE' }); await loadMine(); } catch (error) { notice(error.message, true); } }
   function progressLabel(progress) { if (!progress) return ''; return ({ queued: 'Wartet auf Download', running: 'Wird heruntergeladen', completed: 'Download fertig', partial: 'Teilweise fertig', failed: 'Download fehlgeschlagen', cancelled: 'In MediaForge abgebrochen' })[progress.status] || ''; }
-  function progressDetail(progress) { const phase = ({ download: 'Download', ffmpeg: 'Verarbeitung', upscaling: 'Upscaling', move: 'Verschieben' })[progress.phase] || 'Download'; const episodes = progress.total_episodes > 1 ? ' · ' + progress.current_episode + '/' + progress.total_episodes + ' Episoden' : ''; return phase + ': ' + Math.round(Number(progress.percent) || 0) + '%' + episodes; }
-  function statusLabel(status) { return ({ pending: 'Ausstehend', processing: 'Wird übergeben', queued: 'In MediaForge', completed: 'Download fertig', partial: 'Teilweise fertig', cancelled: 'Außerhalb von Jellyfin abgebrochen', rejected: 'Abgelehnt', withdrawn: 'Zurückgezogen', failed: 'Fehlgeschlagen' })[status] || status; }
+  function progressDetail(progress) { const phase = ({ download: 'Download', ffmpeg: 'Verarbeitung' })[progress.phase] || 'Download'; const episodes = progress.total_episodes > 1 ? ' · ' + progress.current_episode + '/' + progress.total_episodes + ' Episoden' : ''; return phase + ': ' + Math.round(Number(progress.percent) || 0) + '%' + episodes; }
+  function statusLabel(status) { return ({ pending: 'Ausstehend', processing: 'Wird übergeben', queued: 'In MediaForge', completed: 'Download fertig', available: 'Bereits in Jellyfin vorhanden', partial: 'Teilweise fertig', cancelled: 'Außerhalb von Jellyfin abgebrochen', rejected: 'Abgelehnt', withdrawn: 'Zurückgezogen', failed: 'Fehlgeschlagen' })[status] || status; }
   q('refresh-mine').addEventListener('click', loadMine); q('refresh-admin').addEventListener('click', loadAdmin);
   boot();
 }

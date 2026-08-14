@@ -32,10 +32,8 @@ if ($module -notmatch ('MODULE_VERSION = "' + [regex]::Escape([string]$versionIn
     throw "The MediaForge module version does not match version.json"
 }
 
-$routes = Get-Content -LiteralPath (Join-Path $projectRoot "MediaForge.Module\mediaforge_jellyfin_connector\routes.py") -Raw -Encoding UTF8
 $service = Get-Content -LiteralPath (Join-Path $projectRoot "Jellyfin.Plugin.MediaForge\PluginServiceRegistrator.cs") -Raw -Encoding UTF8
-if ($routes -notmatch ('"version": "' + [regex]::Escape([string]$versionInfo.version) + '"') -or
-    $service -notmatch ('Jellyfin-MediaForge-Requests/' + [regex]::Escape([string]$versionInfo.version))) {
+if ($service -notmatch ('Jellyfin-MediaForge-Requests/' + [regex]::Escape([string]$versionInfo.version))) {
     throw "Runtime version strings do not match version.json"
 }
 

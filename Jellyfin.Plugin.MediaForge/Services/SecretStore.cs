@@ -140,7 +140,7 @@ public sealed class SecretStore
         var key = RandomNumberGenerator.GetBytes(KeySize);
         try
         {
-            using var stream = new FileStream(_keyPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough);
+            using var stream = CreateSecureFile(_keyPath);
             stream.Write(key);
             stream.Flush(flushToDisk: true);
             RestrictUnixPermissions(_keyPath);
@@ -160,7 +160,7 @@ public sealed class SecretStore
         var temporary = Path.Combine(directory, Path.GetRandomFileName());
         try
         {
-            using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
+            using (var stream = CreateSecureFile(temporary))
             {
                 stream.Write(contents);
                 stream.Flush(flushToDisk: true);
@@ -180,6 +180,24 @@ public sealed class SecretStore
     private static bool IsValid(string value)
         => value.Length is > 0 and <= 512
             && value.All(character => character is >= '!' and <= '~');
+
+    private static FileStream CreateSecureFile(string path)
+    {
+        var options = new FileStreamOptions
+        {
+            Mode = FileMode.CreateNew,
+            Access = FileAccess.Write,
+            Share = FileShare.None,
+            BufferSize = 4096,
+            Options = FileOptions.WriteThrough,
+        };
+        if (!OperatingSystem.IsWindows())
+        {
+            options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        }
+
+        return new FileStream(path, options);
+    }
 
     private static void RestrictUnixPermissions(string path)
     {

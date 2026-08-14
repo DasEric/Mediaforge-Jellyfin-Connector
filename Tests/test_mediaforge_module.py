@@ -22,7 +22,7 @@ def _mediaforge_login_required(view):
     return decorated
 
 
-def _load_routes_module():
+def _load_routes_module(*, modern: bool = True):
     package_names = (
         "mediaforge",
         "mediaforge.web",
@@ -66,7 +66,10 @@ def _load_routes_module():
             return jsonify({"error": "unauthorized"}), 401
         return None
 
-    api._check_api_key = check_api_key
+    if modern:
+        api.check_api_key = check_api_key
+    else:
+        api._check_api_key = check_api_key
     sys.modules[api.__name__] = api
 
     auth = types.ModuleType("mediaforge.web.auth")
@@ -100,7 +103,7 @@ def _load_routes_module():
     return module
 
 
-def _load_connector_package():
+def _load_connector_package(*, modern: bool = True):
     package_names = (
         "mediaforge",
         "mediaforge.web",
@@ -113,19 +116,38 @@ def _load_connector_package():
         sys.modules[name] = package
 
     registrations = []
+    scope_registrations = []
     registry = types.ModuleType("mediaforge.web.thirdparties.registry")
     registry.module_setting_key = lambda module_id, key: f"module:{module_id}:{key}"
-    registry.register_thirdparty = lambda **kwargs: registrations.append(kwargs)
+
+    if modern:
+
+        def register_thirdparty(*, blueprint=None, **kwargs):
+            registrations.append({**kwargs, "blueprint": blueprint})
+
+    else:
+
+        def register_thirdparty(**kwargs):
+            registrations.append(kwargs)
+
+    registry.register_thirdparty = register_thirdparty
     sys.modules[registry.__name__] = registry
 
     routes = types.ModuleType(
         "mediaforge.web.thirdparties.mediaforge_jellyfin_connector.routes"
     )
-    routes.create_blueprint = lambda _app, _key: (object(), {"connector.health": "status:read"})
+    routes.create_blueprint = lambda _app, _key, _version: (
+        object(),
+        {"mediaforge_jellyfin_connector.connector_health": "status:read"},
+    )
     sys.modules[routes.__name__] = routes
 
     api = types.ModuleType("mediaforge.web.routes.v1_api")
     api._V1_ENDPOINT_SCOPES = {}
+    if modern:
+        api.register_v1_endpoint_scopes = lambda item_id, mapping, **kwargs: scope_registrations.append(
+            (item_id, dict(mapping), kwargs)
+        ) or dict(mapping)
     sys.modules[api.__name__] = api
 
     path = (
@@ -144,7 +166,7 @@ def _load_connector_package():
     sys.modules[name] = module
     assert spec.loader is not None
     spec.loader.exec_module(module)
-    return module, registrations, api._V1_ENDPOINT_SCOPES
+    return module, registrations, scope_registrations, api._V1_ENDPOINT_SCOPES
 
 
 class ConnectorRouteSecurityTests(unittest.TestCase):
@@ -169,8 +191,19 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
                             "new": [
                                 {
                                     "title": "Example",
+                                    "source": "aniworld",
                                     "poster_url": "/api/img?url=https%3A%2F%2Fallowed.invalid%2Fposter.jpg",
-                                }
+                                },
+                                {
+                                    "title": "Adult",
+                                    "source": "hanime",
+                                    "poster_url": "https://allowed.invalid/adult.jpg",
+                                },
+                                {
+                                    "title": "Disabled",
+                                    "source": "disabled",
+                                    "poster_url": "https://allowed.invalid/disabled.jpg",
+                                },
                             ]
                         }
                     }
@@ -182,15 +215,11 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
             endpoint="api_image_proxy",
             view_func=_mediaforge_login_required(lambda: (b"image", 200, {"Content-Type": "image/jpeg"})),
         )
-        blueprint, _scopes = routes.create_blueprint(self.app, "connector_enabled")
+        blueprint, _scopes = routes.create_blueprint(
+            self.app, "connector_enabled", "0.3.0"
+        )
         self.app.register_blueprint(blueprint)
 
-        # Reproduce MediaForge's blanket session-login pass. The connector
-        # must remain usable by a machine client with only X-Api-Key, while
-        # every connector view must still enforce its own scoped key.
-        for endpoint in _scopes:
-            original = self.app.view_functions[endpoint]
-            self.app.view_functions[endpoint] = _mediaforge_login_required(original)
         self.client = self.app.test_client()
 
     def _internal(self, endpoint):
@@ -201,9 +230,22 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
                     {
                         "sources": [
                             {"id": "aniworld", "label": "AniWorld", "adult": False},
+                            {"id": "ANIWORLD", "label": "Duplicate", "adult": False},
                             {"id": "hanime", "label": "hanime 18+", "adult": True},
+                            {
+                                "id": "disabled",
+                                "label": "Disabled",
+                                "adult": False,
+                                "enabled": False,
+                            },
+                            {
+                                "id": "malformed",
+                                "label": "Malformed",
+                                "adult": False,
+                                "enabled": "1",
+                            },
                         ],
-                        "order": ["hanime", "aniworld"],
+                        "order": ["hanime", "disabled", "malformed", "aniworld"],
                     }
                 )
             if endpoint == "api_search":
@@ -254,6 +296,11 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
         )
         self.assertEqual(200, response.status_code)
         self.assertTrue(response.get_json()["ok"])
+        self.assertEqual("0.3.0", response.get_json()["version"])
+
+    def test_mediaforge_15_uses_the_legacy_api_key_fallback(self):
+        routes = _load_routes_module(modern=False)
+        self.assertEqual("check_api_key", routes.check_api_key.__name__)
 
     def test_discovery_does_not_require_a_mediaforge_web_session(self):
         response = self.client.get(
@@ -262,37 +309,38 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
         )
         self.assertEqual(200, response.status_code)
         self.assertEqual("Example", response.get_json()["rows"]["new"][0]["title"])
+        self.assertEqual(1, len(response.get_json()["rows"]["new"]))
         self.assertTrue(
             response.get_json()["rows"]["new"][0]["poster_url"].startswith(
-                "/api/v1/connector/image?url="
+                "/api/img?url="
             )
         )
 
-    def test_sources_filter_adult_content_by_explicit_connector_setting(self):
+    def test_sources_always_filter_adult_content_for_api_key_requests(self):
         headers = {"X-Api-Key": "library:read-key"}
         response = self.client.get("/api/v1/connector/sources", headers=headers)
         self.assertEqual(200, response.status_code)
         self.assertEqual(["aniworld"], [item["id"] for item in response.get_json()["sources"]])
         self.assertEqual(["aniworld"], response.get_json()["order"])
 
-        response = self.client.get(
-            "/api/v1/connector/sources?include_adult=true", headers=headers
+    def test_search_rejects_a_disabled_source(self):
+        response = self.client.post(
+            "/api/v1/connector/search",
+            json={"keyword": "Example", "site": "disabled"},
+            headers={"X-Api-Key": "library:read-key"},
         )
-        self.assertEqual(200, response.status_code)
-        self.assertEqual(
-            ["aniworld", "hanime"],
-            [item["id"] for item in response.get_json()["sources"]],
-        )
-        self.assertEqual(["hanime", "aniworld"], response.get_json()["order"])
+        self.assertEqual(400, response.status_code)
+        self.assertEqual("source disabled", response.get_json()["error"])
+        self.assertEqual(["api_search_sources"], self.calls)
 
-    def test_sources_reject_invalid_adult_filter_values(self):
+    def test_sources_reject_client_controlled_adult_filter(self):
         response = self.client.get(
-            "/api/v1/connector/sources?include_adult=yes",
+            "/api/v1/connector/sources?include_adult=true",
             headers={"X-Api-Key": "library:read-key"},
         )
         self.assertEqual(400, response.status_code)
 
-    def test_search_blocks_adult_source_unless_explicitly_allowed(self):
+    def test_search_blocks_adult_source_and_rejects_override(self):
         headers = {"X-Api-Key": "library:read-key"}
         response = self.client.post(
             "/api/v1/connector/search",
@@ -308,8 +356,8 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
             json={"keyword": "Example", "site": "hanime", "include_adult": True},
             headers=headers,
         )
-        self.assertEqual(200, response.status_code)
-        self.assertEqual(["api_search_sources", "api_search"], self.calls)
+        self.assertEqual(400, response.status_code)
+        self.assertEqual([], self.calls)
 
     def test_image_proxy_requires_scope_and_rejects_non_http_urls(self):
         response = self.client.get(
@@ -347,7 +395,7 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
         self.assertEqual(["api_series"], self.calls)
         self.assertTrue(
             response.get_json()["poster_url"].startswith(
-                "/api/v1/connector/image?url="
+                "/api/img?url="
             )
         )
 
@@ -359,16 +407,51 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
         )
         self.assertEqual(200, response.status_code)
         poster = response.get_json()["results"][0]["poster_url"]
-        self.assertTrue(poster.startswith("/api/v1/connector/image?url="))
+        self.assertTrue(poster.startswith("/api/img?url="))
         self.assertNotIn("https://allowed.invalid/poster.jpg", poster)
 
-    def test_optional_movie_check_keeps_the_original_result_when_unsupported(self):
+    def test_poster_rewrite_parses_existing_proxy_queries_strictly(self):
+        routes = _load_routes_module()
+        valid = {
+            "poster_url": "/api/img?url=https%3A%2F%2Fallowed.invalid%2Fposter.jpg"
+        }
+        routes._proxy_poster(valid)
+        self.assertEqual(
+            "/api/img?url=https%3A%2F%2Fallowed.invalid%2Fposter.jpg",
+            valid["poster_url"],
+        )
+
+        for malformed in (
+            "/api/img?url=https%3A%2F%2Fallowed.invalid%2Fposter.jpg&foo=bar",
+            "/api/img?url=https%3A%2F%2Fa.invalid%2Fx&url=https%3A%2F%2Fb.invalid%2Fx",
+            "/api/img?url=file%3A%2F%2F%2Fetc%2Fpasswd",
+        ):
+            payload = {"poster_url": malformed}
+            routes._proxy_poster(payload)
+            self.assertEqual("", payload["poster_url"])
+
+    def test_recursive_poster_rewrite_does_not_change_unrelated_objects(self):
+        routes = _load_routes_module()
+        payload = {"rows": {"new": [{"title": "No poster"}]}}
+        routes._proxy_posters(payload)
+        self.assertEqual({"rows": {"new": [{"title": "No poster"}]}}, payload)
+
+    def test_episode_download_state_is_passed_through_without_provider_io(self):
         response = self.client.get(
             "/api/v1/connector/episodes?url=https://allowed.invalid/media/movie",
             headers={"X-Api-Key": "library:read-key"},
         )
         self.assertEqual(200, response.status_code)
         self.assertFalse(response.get_json()["episodes"][0]["downloaded"])
+        self.assertEqual(["api_episodes"], self.calls)
+
+    def test_poster_rewrite_rejects_oversized_absolute_url(self):
+        routes = _load_routes_module()
+        payload = {
+            "poster_url": "https://allowed.invalid/" + "a" * routes._MAX_URL_LENGTH
+        }
+        routes._proxy_poster(payload)
+        self.assertEqual("", payload["poster_url"])
 
     def test_download_rejects_extra_fields_and_injected_episode(self):
         base = {
@@ -440,7 +523,7 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
 
 class ConnectorRegistrationTests(unittest.TestCase):
     def test_module_registers_an_explicit_module_settings_card(self):
-        module, registrations, scopes = _load_connector_package()
+        module, registrations, scope_registrations, _legacy_scopes = _load_connector_package()
 
         class FakeApp:
             def __init__(self):
@@ -452,12 +535,41 @@ class ConnectorRegistrationTests(unittest.TestCase):
         app = FakeApp()
         module.register(app)
 
+        self.assertEqual("1.5.0", module.MODULE_MIN_APP_VERSION)
+        self.assertEqual("1.6.999", module.MODULE_MAX_APP_VERSION)
         self.assertEqual(1, len(app.blueprints))
         self.assertEqual(1, len(registrations))
         self.assertEqual("mediaforge_jellyfin_connector", registrations[0]["item_id"])
         self.assertEqual("settings", registrations[0]["settings_host"])
+        self.assertEqual("mediaforge_jellyfin_connector", registrations[0]["blueprint"])
         self.assertEqual("module:mediaforge_jellyfin_connector:enabled", registrations[0]["enabled_setting_key"])
-        self.assertEqual({"connector.health": "status:read"}, scopes)
+        self.assertEqual(1, len(scope_registrations))
+        self.assertEqual("mediaforge_jellyfin_connector", scope_registrations[0][0])
+        self.assertEqual(
+            {"mediaforge_jellyfin_connector.connector_health": "status:read"},
+            scope_registrations[0][1],
+        )
+        self.assertEqual(
+            {"blueprint": "mediaforge_jellyfin_connector"},
+            scope_registrations[0][2],
+        )
+
+    def test_mediaforge_15_uses_the_legacy_scope_registry(self):
+        module, registrations, scope_registrations, legacy_scopes = _load_connector_package(
+            modern=False
+        )
+
+        class FakeApp:
+            def register_blueprint(self, _blueprint):
+                pass
+
+        module.register(FakeApp())
+        self.assertEqual([], scope_registrations)
+        self.assertEqual(
+            {"mediaforge_jellyfin_connector.connector_health": "status:read"},
+            legacy_scopes,
+        )
+        self.assertNotIn("blueprint", registrations[0])
 
 
 if __name__ == "__main__":

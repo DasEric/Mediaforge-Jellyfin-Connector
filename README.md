@@ -10,9 +10,10 @@ movie and TV sources enabled in MediaForge.
 - Search all enabled MediaForge sources or select individual sources.
 - Browse clickable New, Popular, and Movies rows from MediaForge immediately
   when opening the Requests page.
-- Automatically compare a title with MediaForge's library state and request
+- Automatically compare a title with Jellyfin's actual library and request
   only missing movies, seasons, or individual episodes. Complete titles are
-  never queued again.
+  never queued again. Provider IDs are preferred; title and year provide a
+  conservative fallback.
 - Each user has a personal status view, while administrators have a shared
   overview. Requests are stored atomically in the plugin data file.
 - Users can withdraw pending requests and view MediaForge download progress
@@ -20,8 +21,8 @@ movie and TV sources enabled in MediaForge.
   download once it has started.
 - Server-side API connection: a stored MediaForge key is never returned to a
   browser and is not stored as plaintext in the Jellyfin plugin configuration.
-- Adult sources are blocked by default and must be enabled separately in the
-  Jellyfin plugin settings.
+- Adult sources remain blocked for API-key requests by MediaForge's central
+  age gate and cannot be enabled from Jellyfin.
 
 ## Architecture
 
@@ -41,7 +42,7 @@ side and exposes an API-key-protected interface to the Jellyfin plugin.
 ## Requirements
 
 - Jellyfin 10.11 or later
-- MediaForge 1.5 or later
+- MediaForge 1.5.x or 1.6.x
 - MediaForge must be reachable from the Jellyfin server over HTTP(S)
 - .NET 9 SDK for local builds
 
@@ -102,7 +103,7 @@ password field **MediaForge API-Key**. Configure:
 - MediaForge URL
 - API key
 - Request or automatic mode
-- Allowed sources and optional adult-source access
+- Allowed sources
 - Default language and provider
 
 Use **Test saved connection** to verify that the URL, key, scopes, and
@@ -144,11 +145,11 @@ One-time setup:
    tags**, keep **Selected branches and tags** and add a tag rule named `v*`.
    This allows version tags to deploy the repository feed without permitting
    arbitrary refs.
-4. Publish version `0.2.8`:
+4. Publish version `0.3.0`:
 
 ```powershell
-git tag -a v0.2.8 -m "MediaForge Requests 0.2.8"
-git push origin v0.2.8
+git tag -a v0.3.0 -m "MediaForge Requests 0.3.0"
+git push origin v0.3.0
 ```
 
 After the workflow completes successfully, the Jellyfin feed is available at:
@@ -161,11 +162,12 @@ For a later update, update all version references atomically, review the
 changelog, and push the matching tag:
 
 ```powershell
-.\scripts\set-version.ps1 -Version 0.2.8
+$nextVersion = Read-Host "Next version (for example 0.3.1)"
+.\scripts\set-version.ps1 -Version $nextVersion
 git add .
-git commit -m "Release 0.2.8"
-git tag -a v0.2.8 -m "MediaForge Requests 0.2.8"
-git push origin main v0.2.8
+git commit -m "Release $nextVersion"
+git tag -a "v$nextVersion" -m "MediaForge Requests $nextVersion"
+git push origin main "v$nextVersion"
 ```
 
 Jellyfin recognizes the newer version during its next plugin update check by
@@ -177,7 +179,7 @@ directory, but Jellyfin's plugin updater cannot install that module in
 MediaForge.
 
 The Jellyfin plugin can also be installed manually. Extract
-`dist/MediaForgeRequests_0.2.8.zip` to
+`dist/MediaForgeRequests_0.3.0.zip` to
 `/var/lib/jellyfin/plugins/MediaForgeRequests/`. The destination directory must
 contain `Jellyfin.Plugin.MediaForge.dll` and `meta.json`.
 
@@ -196,8 +198,8 @@ If `dotnet` is not available through `PATH`:
 The build creates:
 
 - `dist/Jellyfin.Plugin.MediaForge.dll`
-- `dist/MediaForgeRequests_0.2.8.zip`
-- `dist/mediaforge_jellyfin_connector_0.2.8.zip`
+- `dist/MediaForgeRequests_0.3.0.zip`
+- `dist/mediaforge_jellyfin_connector_0.3.0.zip`
 - `dist/SHA256SUMS.txt`
 
 Remove all generated build output, repository manifests, and local test caches
@@ -226,9 +228,13 @@ before committing source files:
   is explicitly redacted from HTTP client logging. External error messages are
   replaced with fixed, non-sensitive messages before they are displayed or
   stored.
-- The Jellyfin browser never loads posters directly from third-party sources;
-  search and metadata traffic remains server-side between Jellyfin and
-  MediaForge.
+- The Jellyfin browser never loads posters directly from third-party sources.
+  Jellyfin fetches them server-side through MediaForge's allowlisted and
+  SSRF-protected image proxy without exposing either API token in a URL.
+- Existing-content decisions are made from Jellyfin's library, not from paths
+  or download flags reported by MediaForge. The decision is recalculated on
+  the server immediately before a request is stored and again when an
+  administrator approves a pending request.
 - The number of open requests is limited per user.
 - During automatic submission or administrator approval, an atomic status
   transition prevents the same request from being processed twice.

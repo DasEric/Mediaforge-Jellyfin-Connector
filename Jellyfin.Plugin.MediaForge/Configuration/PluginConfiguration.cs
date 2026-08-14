@@ -34,9 +34,6 @@ public class PluginConfiguration : BasePluginConfiguration
     /// <summary>Gets or sets the maximum number of open requests per user.</summary>
     public int MaxPendingRequestsPerUser { get; set; } = 10;
 
-    /// <summary>Gets or sets whether MediaForge sources marked as adult are exposed.</summary>
-    public bool AllowAdultSources { get; set; }
-
     /// <summary>Gets or sets an optional comma-separated source allowlist.</summary>
     public string AllowedSources { get; set; } = string.Empty;
 

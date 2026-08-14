@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
-from urllib.parse import quote, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 from flask import Blueprint, current_app, jsonify, request
 
 from ....models.common.common import get_ffmpeg_progress
 from ....providers import resolve_provider
 from ...db import get_queue_item, get_setting
-from ...routes.v1_api import _check_api_key
+
+try:
+    from ...routes.v1_api import check_api_key
+except ImportError:  # MediaForge 1.5 compatibility
+    from ...routes.v1_api import _check_api_key as check_api_key
 
 _ROUTE_NAMES = {
     "sources": "api_search_sources",
@@ -25,7 +29,7 @@ _MAX_EPISODES = 500
 _MAX_URL_LENGTH = 2048
 _MAX_PROGRESS_IDS = 200
 _QUEUE_STATES = {"queued", "running", "completed", "partial", "failed", "cancelled"}
-_PROGRESS_PHASES = {"download", "ffmpeg", "upscaling", "move"}
+_PROGRESS_PHASES = {"download", "ffmpeg"}
 
 
 def _without_mediaforge_session_login(view):
@@ -80,19 +84,57 @@ def _is_mediaforge_url(value) -> bool:
         return False
 
 
-def _proxy_poster(payload: dict) -> None:
-    poster = payload.get("poster_url")
-    connector_path = "/api/v1/connector/image?url="
-    if not isinstance(poster, str) or not poster:
-        return
-    if poster.startswith(connector_path):
-        return
-    if poster.startswith("/api/img?url="):
-        payload["poster_url"] = connector_path + poster.removeprefix("/api/img?url=")
-    elif poster.startswith(("http://", "https://")):
-        payload["poster_url"] = connector_path + quote(poster, safe="")
+def _normalize_poster_path(poster: str) -> str:
+    """Return one canonical MediaForge image-proxy path or an empty value."""
+    if not _safe_text(poster, 4096):
+        return ""
+    try:
+        parsed = urlsplit(poster.strip())
+    except ValueError:
+        return ""
+
+    raw_url = ""
+    if parsed.scheme in {"http", "https"}:
+        if not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
+            return ""
+        raw_url = poster.strip()
+    elif (
+        not parsed.scheme
+        and not parsed.netloc
+        and parsed.path == "/api/img"
+        and not parsed.fragment
+    ):
+        try:
+            values = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True)
+        except ValueError:
+            return ""
+        if set(values) != {"url"} or len(values["url"]) != 1:
+            return ""
+        raw_url = values["url"][0].strip()
+        try:
+            upstream = urlsplit(raw_url)
+        except ValueError:
+            return ""
+        if (
+            upstream.scheme not in {"http", "https"}
+            or not upstream.hostname
+            or upstream.username
+            or upstream.password
+            or upstream.fragment
+        ):
+            return ""
     else:
-        payload["poster_url"] = ""
+        return ""
+    if not _safe_text(raw_url, _MAX_URL_LENGTH):
+        return ""
+    return "/api/img?url=" + quote(raw_url, safe="")
+
+
+def _proxy_poster(payload: dict) -> None:
+    if "poster_url" not in payload:
+        return
+    poster = payload.get("poster_url")
+    payload["poster_url"] = _normalize_poster_path(poster) if isinstance(poster, str) else ""
 
 
 def _proxy_posters(value) -> None:
@@ -105,27 +147,23 @@ def _proxy_posters(value) -> None:
             _proxy_posters(child)
 
 
-def _parse_include_adult(value, *, default: bool = False):
-    if value is None:
-        return default
-    if value is True or (isinstance(value, str) and value in {"1", "true"}):
-        return True
-    if value is False or (isinstance(value, str) and value in {"0", "false"}):
-        return False
-    return None
-
-
 def _read_source_policy(response):
     payload = response.get_json(silent=True)
     if not isinstance(payload, dict) or not isinstance(payload.get("sources"), list):
         return None
     sources = []
+    seen_source_ids = set()
     for item in payload["sources"]:
+        source_id = item.get("id") if isinstance(item, dict) else None
+        source_key = source_id.casefold() if isinstance(source_id, str) else ""
         if (
             isinstance(item, dict)
-            and isinstance(item.get("id"), str)
+            and _safe_text(source_id, 80)
+            and source_key not in seen_source_ids
             and isinstance(item.get("adult"), bool)
+            and isinstance(item.get("enabled", True), bool)
         ):
+            seen_source_ids.add(source_key)
             sources.append(item)
     payload["sources"] = sources
     return payload
@@ -180,14 +218,14 @@ def _safe_progress_item(queue_id: int, item, live_progress):
     }
 
 
-def create_blueprint(app, enabled_setting_key: str):
+def create_blueprint(app, enabled_setting_key: str, module_version: str = "unknown"):
     """Create the connector blueprint and return its endpoint/scope map.
 
     MediaForge registers the internal search and queue routes before it
     discovers third-party modules.  Capturing the view functions here means
     we call the same implementation before the application's later blanket
     session-login wrapper is applied.  The connector endpoints have their own
-    `_check_api_key` gate and are inserted into MediaForge's v1 scope map.
+    `check_api_key` gate and are inserted into MediaForge's v1 scope map.
     """
 
     missing = [name for name in _ROUTE_NAMES.values() if name not in app.view_functions]
@@ -217,7 +255,7 @@ def create_blueprint(app, enabled_setting_key: str):
     def guard(scope: str):
         if get_setting(enabled_setting_key, "1") != "1":
             return jsonify({"error": "connector disabled"}), 503
-        return _check_api_key(scope)
+        return check_api_key(scope)
 
     @bp.get("/api/v1/connector/health")
     def api_connector_health():
@@ -228,7 +266,7 @@ def create_blueprint(app, enabled_setting_key: str):
             {
                 "ok": True,
                 "module": "mediaforge_jellyfin_connector",
-                "version": "0.2.8",
+                "version": module_version,
             }
         )
 
@@ -237,19 +275,21 @@ def create_blueprint(app, enabled_setting_key: str):
         auth_error = guard("library:read")
         if auth_error:
             return auth_error
-        if set(request.args) - {"include_adult"}:
+        if request.args:
             return jsonify({"error": "unexpected query parameters"}), 400
-        include_adult = _parse_include_adult(request.args.get("include_adult"))
-        if include_adult is None:
-            return jsonify({"error": "invalid include_adult value"}), 400
         upstream = current_app.make_response(internal["sources"]())
         if upstream.status_code != 200:
             return upstream
         payload = _read_source_policy(upstream)
         if payload is None:
             return jsonify({"error": "invalid sources response"}), 502
-        if not include_adult:
-            payload["sources"] = [item for item in payload["sources"] if not item["adult"]]
+        # MediaForge's age gate is authoritative. API-key requests have no
+        # browser session and therefore cannot opt into adult sources.
+        payload["sources"] = [
+            item
+            for item in payload["sources"]
+            if not item["adult"] and item.get("enabled", True) is not False
+        ]
         visible_ids = {item["id"] for item in payload["sources"]}
         if isinstance(payload.get("order"), list):
             payload["order"] = [source_id for source_id in payload["order"] if source_id in visible_ids]
@@ -263,16 +303,12 @@ def create_blueprint(app, enabled_setting_key: str):
         body = request.get_json(silent=True)
         if not isinstance(body, dict):
             return jsonify({"error": "JSON object required"}), 400
-        if set(body) - {"keyword", "site", "include_adult"}:
+        if set(body) - {"keyword", "site"}:
             return jsonify({"error": "unexpected request fields"}), 400
         if not _safe_text(body.get("keyword"), 120) or len(body["keyword"].strip()) < 2:
             return jsonify({"error": "invalid keyword"}), 400
         if not _safe_text(body.get("site"), 80):
             return jsonify({"error": "invalid source"}), 400
-        include_adult = _parse_include_adult(body.get("include_adult"))
-        if include_adult is None:
-            return jsonify({"error": "invalid include_adult value"}), 400
-
         sources_response = current_app.make_response(internal["sources"]())
         if sources_response.status_code != 200:
             return sources_response
@@ -285,8 +321,10 @@ def create_blueprint(app, enabled_setting_key: str):
         )
         if source is None:
             return jsonify({"error": "unknown source"}), 400
-        if source["adult"] and not include_adult:
+        if source["adult"]:
             return jsonify({"error": "adult source not permitted", "code": "age_limited"}), 403
+        if source.get("enabled", True) is False:
+            return jsonify({"error": "source disabled"}), 400
 
         upstream = current_app.make_response(internal["search"]())
         if upstream.status_code != 200:
@@ -335,27 +373,7 @@ def create_blueprint(app, enabled_setting_key: str):
         upstream = current_app.make_response(internal["episodes"]())
         if upstream.status_code != 200:
             return upstream
-        payload = upstream.get_json(silent=True)
-        if not isinstance(payload, dict) or not isinstance(payload.get("episodes"), list):
-            return jsonify({"error": "invalid episodes response"}), 502
-
-        # MediaForge 1.5 reports movie entries as not downloaded even when the
-        # target file already exists. Its provider models do expose the real
-        # check, so correct only the explicit single-movie response shape.
-        episodes = payload["episodes"]
-        if len(episodes) == 1 and isinstance(episodes[0], dict) and "season_number" in episodes[0]:
-            try:
-                provider = resolve_provider(request.args.get("url", "").strip())
-                model = provider.episode_cls(url=request.args["url"].strip())
-                state = model.is_downloaded
-                episodes[0]["downloaded"] = (
-                    bool(state.get("exists")) if isinstance(state, dict) else bool(state)
-                )
-            except Exception:  # noqa: BLE001 - optional compatibility correction
-                # Fail closed to MediaForge's original result. Queue workers
-                # perform their own final existence check as well.
-                episodes[0].setdefault("downloaded", False)
-        return jsonify(payload)
+        return upstream
 
     @bp.get("/api/v1/connector/providers")
     def api_connector_providers():
@@ -437,11 +455,22 @@ def create_blueprint(app, enabled_setting_key: str):
         if auth_error:
             return auth_error
         # The MediaForge home feed accepts adult/limit query parameters. The
-        # connector deliberately exposes neither: adult content remains an
-        # explicit Jellyfin administrator decision, and MediaForge's bounded
-        # configured row limit is used as-is.
+        # connector deliberately exposes neither: API-key clients cannot opt
+        # into adult content, and MediaForge's bounded configured row limit is
+        # used as-is.
         if request.args:
             return jsonify({"error": "unexpected query parameters"}), 400
+        sources_response = current_app.make_response(internal["sources"]())
+        if sources_response.status_code != 200:
+            return sources_response
+        source_policy = _read_source_policy(sources_response)
+        if source_policy is None:
+            return jsonify({"error": "invalid sources response"}), 502
+        visible_ids = {
+            item["id"]
+            for item in source_policy["sources"]
+            if not item["adult"] and item.get("enabled", True) is not False
+        }
         handler = late_internal("api_home_feed")
         if handler is None:
             return jsonify({"error": "home feed unavailable"}), 503
@@ -449,13 +478,27 @@ def create_blueprint(app, enabled_setting_key: str):
         if upstream.status_code != 200:
             return upstream
         payload = upstream.get_json(silent=True)
-        if not isinstance(payload, dict):
+        if (
+            not isinstance(payload, dict)
+            or not isinstance(payload.get("rows"), dict)
+        ):
             return jsonify({"error": "invalid home feed response"}), 502
+        for row_name, items in list(payload["rows"].items()):
+            payload["rows"][row_name] = (
+                [
+                    item
+                    for item in items
+                    if isinstance(item, dict) and item.get("source") in visible_ids
+                ]
+                if isinstance(items, list)
+                else []
+            )
         _proxy_posters(payload)
         return jsonify(payload)
 
     @bp.get("/api/v1/connector/image")
     def api_connector_image():
+        """Compatibility image proxy for MediaForge 1.5 API-key clients."""
         auth_error = guard("library:read")
         if auth_error:
             return auth_error
@@ -476,24 +519,9 @@ def create_blueprint(app, enabled_setting_key: str):
             or parsed.fragment
         ):
             return jsonify({"error": "invalid image URL"}), 400
-        # MediaForge's own image handler performs the authoritative hostname
-        # allowlist and DNS/IP SSRF checks before any network request.
         handler = late_internal("api_image_proxy")
         return handler() if handler is not None else (jsonify({"error": "image proxy unavailable"}), 503)
 
-    # MediaForge's current startup pass reads ``_V1_ENDPOINT_SCOPES`` and
-    # correctly leaves these views free of its session-login wrapper.  A
-    # module installed or refreshed in an already running MediaForge process,
-    # however, can still be wrapped by older/current live-registration paths.
-    # Such a wrapper rejects a valid X-Api-Key unless the caller also happens
-    # to own a browser session, which machine clients such as Jellyfin do not.
-    #
-    # Blueprint before-request handlers run after MediaForge's application
-    # before-request security checks but before Flask resolves the view for
-    # dispatch.  Restore only our exact, locally captured view when a wrapper
-    # chain still terminates at that view.  The route's first operation remains
-    # ``guard()`` / ``_check_api_key()``, and no MediaForge or third-party
-    # endpoint can be affected by this narrowly keyed compatibility fallback.
     connector_views = {
         "mediaforge_jellyfin_connector.api_connector_health": api_connector_health,
         "mediaforge_jellyfin_connector.api_connector_sources": api_connector_sources,
@@ -507,25 +535,6 @@ def create_blueprint(app, enabled_setting_key: str):
         "mediaforge_jellyfin_connector.api_connector_discover": api_connector_discover,
         "mediaforge_jellyfin_connector.api_connector_image": api_connector_image,
     }
-
-    @bp.before_request
-    def _keep_connector_api_key_only():
-        endpoint = request.endpoint or ""
-        expected = connector_views.get(endpoint)
-        registered = current_app.view_functions.get(endpoint)
-        if expected is None or registered is None or registered is expected:
-            return
-
-        candidate = registered
-        visited = set()
-        while candidate is not expected and id(candidate) not in visited:
-            visited.add(id(candidate))
-            candidate = getattr(candidate, "__wrapped__", None)
-            if candidate is None:
-                break
-
-        if candidate is expected:
-            current_app.view_functions[endpoint] = expected
 
     scopes = dict.fromkeys(connector_views)
     scopes.update(
