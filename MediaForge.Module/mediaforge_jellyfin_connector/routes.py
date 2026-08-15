@@ -7,9 +7,10 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 from flask import Blueprint, current_app, jsonify, request
 
+from ....mirrors import site_for_url
 from ....models.common.common import get_ffmpeg_progress
 from ....providers import resolve_provider
-from ...db import get_queue_item, get_setting
+from ...db import get_custom_paths, get_queue_item, get_setting
 
 try:
     from ...routes.v1_api import check_api_key
@@ -241,6 +242,39 @@ def _accepted_episode_count(queue_id: int):
         return None
 
 
+def _default_custom_path_id(series_url: str):
+    """Mirror MediaForge's own per-site default-path selection."""
+    site = site_for_url(series_url)
+    if site is None:
+        return None
+    if not _safe_text(site, 80):
+        raise ValueError("invalid MediaForge site identifier")
+    site = site.strip().lower()
+
+    paths = get_custom_paths()
+    if not isinstance(paths, list):
+        raise ValueError("invalid MediaForge custom-path response")
+    for item in paths:
+        if not isinstance(item, dict):
+            raise ValueError("invalid MediaForge custom-path entry")
+        default_sites = item.get("default_sites", "")
+        if not isinstance(default_sites, str):
+            raise ValueError("invalid MediaForge default-site assignment")
+        sites = {
+            value.strip().lower()
+            for value in default_sites.split(",")
+            if value.strip()
+        }
+        if site not in sites:
+            continue
+
+        path_id = item.get("id")
+        if type(path_id) is not int or path_id <= 0:
+            raise ValueError("invalid MediaForge custom-path identifier")
+        return path_id
+    return None
+
+
 def create_blueprint(app, enabled_setting_key: str, module_version: str = "unknown"):
     """Create the connector blueprint and return its endpoint/scope map.
 
@@ -445,6 +479,21 @@ def create_blueprint(app, enabled_setting_key: str, module_version: str = "unkno
             return jsonify({"error": "invalid provider"}), 400
         if "upscale" in body and not isinstance(body["upscale"], bool):
             return jsonify({"error": "invalid upscale flag"}), 400
+
+        try:
+            custom_path_id = _default_custom_path_id(body["series_url"])
+        except Exception as exc:  # noqa: BLE001 - never queue to an unknown target
+            current_app.logger.warning(
+                "MediaForge connector could not resolve the default download path (%s)",
+                type(exc).__name__,
+            )
+            return jsonify({"error": "default download path resolution failed"}), 503
+        if custom_path_id is not None:
+            # Flask returns the same cached JSON object to MediaForge's core
+            # handler below. The connector validates the public body first and
+            # only then adds this server-resolved, non-client-controlled value.
+            body["custom_path_id"] = custom_path_id
+
         upstream = current_app.make_response(internal["download"]())
         if upstream.status_code != 200:
             return upstream

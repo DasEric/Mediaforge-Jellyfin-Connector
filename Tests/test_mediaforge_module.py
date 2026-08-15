@@ -30,6 +30,7 @@ def _load_routes_module(*, modern: bool = True):
         "mediaforge.web.routes",
         "mediaforge.web.thirdparties",
         "mediaforge.web.thirdparties.mediaforge_jellyfin_connector",
+        "mediaforge.mirrors",
         "mediaforge.models",
         "mediaforge.models.common",
     )
@@ -40,6 +41,20 @@ def _load_routes_module(*, modern: bool = True):
 
     database = types.ModuleType("mediaforge.web.db")
     database.get_setting = lambda _key, default="": default
+    database.get_custom_paths = lambda: [
+        {
+            "id": 11,
+            "name": "Series",
+            "path": "/private/series",
+            "default_sites": "aniworld,sto",
+        },
+        {
+            "id": 12,
+            "name": "Movies",
+            "path": "/private/movies",
+            "default_sites": "filmpalast,filmo",
+        },
+    ]
     database.get_queue_item = lambda queue_id: {
         "id": queue_id,
         "status": "running",
@@ -53,6 +68,12 @@ def _load_routes_module(*, modern: bool = True):
         ),
     }
     sys.modules[database.__name__] = database
+
+    mirrors = types.ModuleType("mediaforge.mirrors")
+    mirrors.site_for_url = lambda url: (
+        "filmpalast" if isinstance(url, str) and url.endswith("/movie") else "aniworld"
+    )
+    sys.modules[mirrors.__name__] = mirrors
 
     common = types.ModuleType("mediaforge.models.common.common")
     common.get_ffmpeg_progress = lambda: {
@@ -179,6 +200,7 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
         self.routes = routes
         self.app = Flask(__name__)
         self.calls = []
+        self.download_bodies = []
         for endpoint in routes._ROUTE_NAMES.values():
             self.app.add_url_rule(
                 f"/internal/{endpoint}",
@@ -285,6 +307,7 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
                     }
                 )
             if endpoint == "api_download":
+                self.download_bodies.append(dict(request.get_json(silent=True) or {}))
                 return jsonify({"queue_id": 42})
             return jsonify({"ok": True})
 
@@ -478,6 +501,13 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
 
         response = self.client.post(
             "/api/v1/connector/download",
+            json={**base, "custom_path_id": 999},
+            headers={"X-Api-Key": "queue:write-key"},
+        )
+        self.assertEqual(400, response.status_code)
+
+        response = self.client.post(
+            "/api/v1/connector/download",
             json={**base, "episodes": ["http://127.0.0.1/admin"]},
             headers={"X-Api-Key": "queue:write-key"},
         )
@@ -504,6 +534,100 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
         self.assertEqual(["api_download"], self.calls)
         self.assertEqual(42, response.get_json()["queue_id"])
         self.assertEqual(2, response.get_json()["accepted_episode_count"])
+        self.assertEqual(11, self.download_bodies[0]["custom_path_id"])
+        self.assertNotIn("/private/series", response.get_data(as_text=True))
+
+    def test_movie_and_series_defaults_follow_mediaforge_site_assignments(self):
+        headers = {"X-Api-Key": "queue:write-key"}
+        base = {
+            "episodes": ["https://allowed.invalid/media/episode-1"],
+            "language": "German Dub",
+            "provider": "VOE",
+            "title": "Title",
+            "upscale": False,
+        }
+        series_response = self.client.post(
+            "/api/v1/connector/download",
+            json={**base, "series_url": "https://allowed.invalid/media/series"},
+            headers=headers,
+        )
+        movie_response = self.client.post(
+            "/api/v1/connector/download",
+            json={**base, "series_url": "https://allowed.invalid/media/movie"},
+            headers=headers,
+        )
+
+        self.assertEqual(200, series_response.status_code)
+        self.assertEqual(200, movie_response.status_code)
+        self.assertEqual(11, self.download_bodies[0]["custom_path_id"])
+        self.assertEqual(12, self.download_bodies[1]["custom_path_id"])
+
+    def test_no_site_default_preserves_mediaforge_global_download_path(self):
+        self.routes.site_for_url = lambda _url: "megakino"
+        response = self.client.post(
+            "/api/v1/connector/download",
+            json={
+                "episodes": ["https://allowed.invalid/media/episode-1"],
+                "language": "German Dub",
+                "provider": "VOE",
+                "title": "Title",
+                "series_url": "https://allowed.invalid/media/series",
+                "upscale": False,
+            },
+            headers={"X-Api-Key": "queue:write-key"},
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertNotIn("custom_path_id", self.download_bodies[0])
+
+    def test_duplicate_site_defaults_use_mediaforge_database_order(self):
+        self.routes.get_custom_paths = lambda: [
+            {"id": 21, "default_sites": "aniworld"},
+            {"id": 22, "default_sites": "aniworld"},
+        ]
+        response = self.client.post(
+            "/api/v1/connector/download",
+            json={
+                "episodes": ["https://allowed.invalid/media/episode-1"],
+                "language": "German Dub",
+                "provider": "VOE",
+                "title": "Title",
+                "series_url": "https://allowed.invalid/media/series",
+                "upscale": False,
+            },
+            headers={"X-Api-Key": "queue:write-key"},
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(21, self.download_bodies[0]["custom_path_id"])
+
+    def test_invalid_or_unavailable_path_configuration_fails_before_queueing(self):
+        headers = {"X-Api-Key": "queue:write-key"}
+        body = {
+            "episodes": ["https://allowed.invalid/media/episode-1"],
+            "language": "German Dub",
+            "provider": "VOE",
+            "title": "Title",
+            "series_url": "https://allowed.invalid/media/series",
+            "upscale": False,
+        }
+        for loader in (
+            lambda: [{"id": "not-an-integer", "default_sites": "aniworld"}],
+            lambda: (_ for _ in ()).throw(RuntimeError("database unavailable")),
+        ):
+            with self.subTest(loader=loader):
+                self.calls.clear()
+                self.download_bodies.clear()
+                self.routes.get_custom_paths = loader
+                response = self.client.post(
+                    "/api/v1/connector/download",
+                    json=body,
+                    headers=headers,
+                )
+                self.assertEqual(503, response.status_code)
+                self.assertEqual([], self.calls)
+                self.assertEqual([], self.download_bodies)
+                self.assertNotIn("/private/", response.get_data(as_text=True))
 
     def test_optional_queue_count_check_cannot_turn_success_into_failure(self):
         def unavailable(_queue_id):
