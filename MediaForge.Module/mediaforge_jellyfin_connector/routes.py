@@ -253,13 +253,13 @@ def _default_custom_path_id(series_url: str):
 
     paths = get_custom_paths()
     if not isinstance(paths, list):
-        raise ValueError("invalid MediaForge custom-path response")
+        raise TypeError("invalid MediaForge custom-path response")
     for item in paths:
         if not isinstance(item, dict):
-            raise ValueError("invalid MediaForge custom-path entry")
+            raise TypeError("invalid MediaForge custom-path entry")
         default_sites = item.get("default_sites", "")
         if not isinstance(default_sites, str):
-            raise ValueError("invalid MediaForge default-site assignment")
+            raise TypeError("invalid MediaForge default-site assignment")
         sites = {
             value.strip().lower()
             for value in default_sites.split(",")

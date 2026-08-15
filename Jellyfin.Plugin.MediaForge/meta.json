@@ -1,6 +1,6 @@
 {
   "category": "General",
-  "changelog": "v0.3.3\n- Honor MediaForge's configured per-site default download paths for Jellyfin requests\n- Keep MediaForge's global download path when a site has no custom default\n- Refuse queue submission if target-path resolution fails instead of writing to an unknown location",
+  "changelog": "v0.3.4\n- Honor MediaForge's configured per-site default download paths for Jellyfin requests\n- Keep MediaForge's global download path when a site has no custom default\n- Refuse queue submission if target-path resolution fails and keep validation compliant with the release linter",
   "description": "Searches the movie and TV sources enabled in MediaForge directly from Jellyfin. Users can request downloads; administrators can approve them or enable automatic mode.",
   "guid": "2ea7f67d-8e4d-4c84-bd5a-a5bcd713bb23",
   "name": "MediaForge Requests",
@@ -8,7 +8,7 @@
   "owner": "MediaForge Jellyfin Connector contributors",
   "targetAbi": "10.11.0.0",
   "timestamp": "2026-08-15T00:00:00Z",
-  "version": "0.3.3.0",
+  "version": "0.3.4.0",
   "status": "Active",
   "autoUpdate": true
 }
