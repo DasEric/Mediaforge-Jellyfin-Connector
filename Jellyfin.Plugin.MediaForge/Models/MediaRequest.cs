@@ -75,6 +75,14 @@ public sealed class MediaRequest
             }
         }
     }
+
+    /// <summary>Gets or sets transient synchronized progress for in-process consumers.</summary>
+    [JsonIgnore]
+    public int? Progress { get; set; }
+
+    /// <summary>Gets or sets whether MediaForge reports an actively running queue item.</summary>
+    [JsonIgnore]
+    public bool QueueRunning { get; set; }
 }
 
 /// <summary>Known request status values.</summary>

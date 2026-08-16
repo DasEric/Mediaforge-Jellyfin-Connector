@@ -6,8 +6,12 @@ using Jellyfin.Plugin.MediaForge;
 using Jellyfin.Plugin.MediaForge.Configuration;
 using Jellyfin.Plugin.MediaForge.Api;
 using Jellyfin.Plugin.MediaForge.Helpers;
+using Jellyfin.Plugin.MediaForge.Integration;
 using Jellyfin.Plugin.MediaForge.Models;
 using Jellyfin.Plugin.MediaForge.Services;
+using Jellyfin.Database.Implementations.Entities;
+using Jellyfin.Data;
+using Jellyfin.Database.Implementations.Enums;
 using MediaBrowser.Common.Api;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Movies;
@@ -35,8 +39,11 @@ try
     TestRequestPageContract();
     TestWebInjection();
     TestMediaGrants();
+    TestJellixSelectionTokens();
     TestRateLimiter();
     await TestRequestStoreAsync(testRoot);
+    await TestJellixBridgeAsync(testRoot);
+    await TestSharedApplicationRulesAsync(testRoot);
     Console.WriteLine("All connector security tests passed.");
     return 0;
 }
@@ -196,13 +203,14 @@ static void TestApiJsonContracts()
         Assert(!root.TryGetProperty("Title", out _), "MediaRequest leaked an unexpected PascalCase response field.");
     }
 
-    AssertJsonNames("SourceInfo", new Dictionary<string, string>
+    AssertJsonNames(typeof(MediaForgeSourceInfo), new Dictionary<string, string>
     {
         ["Id"] = "id",
         ["Label"] = "label",
         ["Adult"] = "adult",
+        ["MediaTypes"] = "media_types",
     });
-    AssertJsonNames("SearchGroup", new Dictionary<string, string>
+    AssertJsonNames(typeof(MediaForgeSearchGroup), new Dictionary<string, string>
     {
         ["Source"] = "source",
         ["Label"] = "label",
@@ -210,26 +218,32 @@ static void TestApiJsonContracts()
         ["Error"] = "error",
     });
 
-    var controllerSource = File.ReadAllText(
-        Path.Combine("Jellyfin.Plugin.MediaForge", "Api", "MediaForgeRequestsController.cs"));
+    var controllerSource = File.ReadAllText(Path.Combine(
+        "Jellyfin.Plugin.MediaForge",
+        "Api",
+        "MediaForgeRequestsController.cs"));
+    var applicationSource = File.ReadAllText(Path.Combine(
+        "Jellyfin.Plugin.MediaForge",
+        "Services",
+        "MediaForgeRequestApplicationService.cs"));
     Assert(
-        controllerSource.Contains("sources = sources.Take(maximum).ToList()", StringComparison.Ordinal),
+        applicationSource.Contains("sources = sources.Take(maximum).ToList()", StringComparison.Ordinal),
         "The all-source fan-out limit is not applied at search time.");
     Assert(
-        controllerSource.Contains("output.Count >= MaxKnownSources", StringComparison.Ordinal),
+        applicationSource.Contains("output.Count >= MaxKnownSources", StringComparison.Ordinal),
         "The source catalogue has no independent safety bound.");
     Assert(
-        controllerSource.Contains("refreshAvailability: true", StringComparison.Ordinal)
-        && controllerSource.Contains("requireGrant: false", StringComparison.Ordinal),
+        applicationSource.Contains("refreshAvailability: true", StringComparison.Ordinal)
+        && applicationSource.Contains("requireGrant: false", StringComparison.Ordinal),
         "Administrator approval does not refresh Jellyfin library availability.");
 
-    var readSources = typeof(MediaForgeRequestsController).GetMethod(
+    var readSources = typeof(MediaForgeRequestApplicationService).GetMethod(
         "ReadAllowedSources",
         System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)
         ?? throw new InvalidOperationException("Missing source response validator.");
     using var malformedSources = JsonDocument.Parse(
-        """{"sources":[null,"bad",{"id":"adult-unknown","label":"Bad","adult":"false"},{"id":"ok","label":"Okay","adult":false},{"id":"OK","label":"Duplicate","adult":false}]}""");
-    var filteredSources = readSources.Invoke(null, [malformedSources.RootElement]);
+        """{"sources":[null,"bad",{"id":"adult-unknown","label":"Bad","adult":"false","media_types":["series"]},{"id":"ok","label":"Okay","adult":false,"enabled":true,"media_types":["series"]},{"id":"OK","label":"Duplicate","adult":false,"enabled":true,"media_types":["series"]}]}""");
+    var filteredSources = readSources.Invoke(null, [malformedSources.RootElement, new PluginConfiguration()]);
     using var filteredDocument = JsonDocument.Parse(JsonSerializer.Serialize(filteredSources));
     var filteredArray = filteredDocument.RootElement;
     Assert(filteredArray.GetArrayLength() == 1, "Malformed or duplicate MediaForge sources were not rejected.");
@@ -425,6 +439,44 @@ static void TestServiceRegistrationAndImageTypes()
     Assert(
         services.Any(descriptor => descriptor.ServiceType == typeof(JellyfinLibraryAvailabilityService)),
         "The Jellyfin library availability service is missing from dependency injection.");
+    Assert(
+        services.Any(descriptor => descriptor.ServiceType == typeof(MediaForgeRequestApplicationService)
+            && descriptor.Lifetime == ServiceLifetime.Singleton),
+        "The shared MediaForge application service is not registered as a singleton.");
+    Assert(
+        services.Any(descriptor => descriptor.ServiceType == typeof(JellixSelectionTokenStore)
+            && descriptor.Lifetime == ServiceLifetime.Singleton),
+        "The Jellix selection-token store is not registered as a singleton.");
+    Assert(
+        services.Any(descriptor => descriptor.ServiceType == typeof(JellixBridge)
+            && descriptor.Lifetime == ServiceLifetime.Singleton),
+        "The concrete Jellix bridge is not registered as a singleton.");
+
+    var bridgeType = typeof(Plugin).Assembly.GetType(
+        "Jellyfin.Plugin.MediaForge.Integration.JellixBridge",
+        throwOnError: true,
+        ignoreCase: false)!;
+    var invoke = bridgeType.GetMethod(nameof(JellixBridge.InvokeAsync))
+        ?? throw new InvalidOperationException("The Jellix bridge method is missing.");
+    Assert(
+        invoke.ReturnType == typeof(Task<string>)
+        && invoke.GetParameters().Select(parameter => parameter.ParameterType).SequenceEqual([
+            typeof(string),
+            typeof(string),
+            typeof(string),
+            typeof(string),
+            typeof(string),
+            typeof(CancellationToken),
+        ]),
+        "The Jellix bridge reflection contract changed.");
+    var bridgeSource = File.ReadAllText(Path.Combine(
+        "Jellyfin.Plugin.MediaForge",
+        "Integration",
+        "JellixBridge.cs"));
+    Assert(!bridgeSource.Contains("GetApiKey", StringComparison.Ordinal), "The Jellix bridge reads the MediaForge API key.");
+    Assert(!bridgeSource.Contains("X-Api-Key", StringComparison.OrdinalIgnoreCase), "The Jellix bridge exposes an API header.");
+    Assert(!bridgeSource.Contains("requests.json", StringComparison.OrdinalIgnoreCase), "The Jellix bridge accesses the request file directly.");
+    Assert(!bridgeSource.Contains("MediaForgeRequestsController", StringComparison.Ordinal), "The Jellix bridge invokes the HTTP controller.");
 
     var field = typeof(MediaForgeClient).GetField(
         "AllowedImageTypes",
@@ -502,7 +554,7 @@ static async Task TestEpisodePlanningContractAsync()
         {
             MediaForgeRequestsController.ReadExpectedEpisodeCount(invalidSeason.RootElement);
         }
-        catch (MediaForgeException)
+        catch (Exception exception) when (exception is MediaForgeException or MediaForgeApplicationException)
         {
             rejected = true;
         }
@@ -576,20 +628,16 @@ static async Task TestEpisodePlanningContractAsync()
         "Two incomplete season responses did not fail closed before queueing.");
 }
 
-static void AssertJsonNames(string nestedTypeName, IReadOnlyDictionary<string, string> expected)
+static void AssertJsonNames(Type type, IReadOnlyDictionary<string, string> expected)
 {
-    var type = typeof(MediaForgeRequestsController).GetNestedType(
-        nestedTypeName,
-        System.Reflection.BindingFlags.NonPublic)
-        ?? throw new InvalidOperationException($"Missing API response type {nestedTypeName}.");
     foreach (var pair in expected)
     {
         var property = type.GetProperty(pair.Key)
-            ?? throw new InvalidOperationException($"Missing {nestedTypeName}.{pair.Key}.");
+            ?? throw new InvalidOperationException($"Missing {type.Name}.{pair.Key}.");
         var attribute = property.GetCustomAttributes(typeof(JsonPropertyNameAttribute), inherit: true)
             .Cast<JsonPropertyNameAttribute>()
             .SingleOrDefault();
-        Assert(attribute?.Name == pair.Value, $"{nestedTypeName}.{pair.Key} must serialize as {pair.Value}.");
+        Assert(attribute?.Name == pair.Value, $"{type.Name}.{pair.Key} must serialize as {pair.Value}.");
     }
 }
 
@@ -646,6 +694,356 @@ static void TestRateLimiter()
     Assert(limiter.TryConsume("user-a", "search", 2, TimeSpan.FromMinutes(1)), "Second request was rejected.");
     Assert(!limiter.TryConsume("user-a", "search", 2, TimeSpan.FromMinutes(1)), "Rate limit was not enforced.");
     Assert(limiter.TryConsume("user-b", "search", 2, TimeSpan.FromMinutes(1)), "Rate limit leaked between users.");
+}
+
+static void TestJellixSelectionTokens()
+{
+    var now = new DateTime(2026, 8, 16, 12, 0, 0, DateTimeKind.Utc);
+    var tokens = new JellixSelectionTokenStore(() => now, TimeSpan.FromMinutes(10));
+    var token = tokens.Issue(
+        "user-a",
+        "series",
+        "Example Show",
+        "2026",
+        "source-a",
+        "https://example.invalid/series/example");
+    Assert(token.Length is > 0 and <= 100, "Selection token length is incompatible with Jellix.");
+    Assert(!token.Contains("Example", StringComparison.OrdinalIgnoreCase), "Selection token contains the media title.");
+    Assert(!token.Contains("example.invalid", StringComparison.OrdinalIgnoreCase), "Selection token contains an upstream URL.");
+    Assert(!tokens.TryConsumeAny(token + "x", "user-a", out _), "A tampered selection token was accepted.");
+    Assert(!tokens.TryConsumeAny(token, "user-b", out _), "Another user consumed a selection token.");
+    Assert(tokens.TryConsume(token, "user-a", "series", out var selection), "The owner could not consume a valid token.");
+    Assert(selection.Source == "source-a" && selection.MediaType == "series", "Selection token resolved to different media.");
+    Assert(!tokens.TryConsumeAny(token, "user-a", out _), "A selection token was replayed.");
+
+    var wrongType = tokens.Issue(
+        "user-a",
+        "movie",
+        "Example Movie",
+        "2026",
+        "source-a",
+        "https://example.invalid/movie/example");
+    Assert(!tokens.TryConsume(wrongType, "user-a", "series", out _), "A token crossed its media-type boundary.");
+    Assert(tokens.TryConsume(wrongType, "user-a", "movie", out _), "A wrong-type attempt invalidated another valid selection.");
+
+    var expiring = tokens.Issue(
+        "user-a",
+        "series",
+        "Expiring",
+        string.Empty,
+        "source-a",
+        "https://example.invalid/series/expiring");
+    now = now.AddMinutes(11);
+    Assert(!tokens.TryConsumeAny(expiring, "user-a", out _), "An expired selection token was accepted.");
+
+    var concurrent = tokens.Issue(
+        "user-a",
+        "series",
+        "Concurrent",
+        string.Empty,
+        "source-a",
+        "https://example.invalid/series/concurrent");
+    var winners = Enumerable.Range(0, 20)
+        .AsParallel()
+        .Count(attempt => tokens.TryConsumeAny(concurrent, "user-a", out _));
+    Assert(winners == 1, "Concurrent token submission had more than one winner.");
+}
+
+static async Task TestJellixBridgeAsync(string testRoot)
+{
+    var config = new PluginConfiguration
+    {
+        MediaForgeUrl = "http://mediaforge.invalid:8080",
+        MaxPendingRequestsPerUser = 10,
+    };
+    var environment = CreateApplicationEnvironment(testRoot, "bridge", config);
+    var userAId = Guid.NewGuid();
+    var userBId = Guid.NewGuid();
+    var userA = new User("Server User A", "auth", "reset") { Id = userAId };
+    var userB = new User("Server User B", "auth", "reset") { Id = userBId };
+    var users = UserManagerProxy.Create([userA, userB]);
+    var bridge = new JellixBridge(environment.Application, environment.Client, users);
+
+    var statusJson = await bridge.InvokeAsync(
+        "1",
+        "status",
+        Guid.Empty.ToString("N"),
+        "Jellix",
+        "{}",
+        CancellationToken.None);
+    using (var status = JsonDocument.Parse(statusJson))
+    {
+        Assert(status.RootElement.GetProperty("configured").GetBoolean(), "Bridge status did not detect the configured test connector.");
+        Assert(status.RootElement.GetProperty("apiKeyValid").GetBoolean(), "Bridge status incorrectly rejected a valid test API key.");
+        Assert(status.RootElement.GetProperty("healthy").GetBoolean(), "Bridge status did not use the sanitized health result.");
+        Assert(!statusJson.Contains("test-secret", StringComparison.Ordinal), "Bridge status exposed an API key.");
+    }
+
+    await AssertBridgeRejectedAsync(() => bridge.InvokeAsync(
+        "2",
+        "status",
+        Guid.Empty.ToString("N"),
+        "Jellix",
+        "{}",
+        CancellationToken.None), "An unsupported bridge protocol was accepted.");
+    await AssertBridgeRejectedAsync(() => bridge.InvokeAsync(
+        "1",
+        "list",
+        Guid.NewGuid().ToString("N"),
+        "deleted",
+        "{}",
+        CancellationToken.None), "A deleted or unknown Jellyfin user was accepted.");
+    var disabled = new User("Disabled", "auth", "reset") { Id = Guid.NewGuid() };
+    disabled.SetPermission(PermissionKind.IsDisabled, true);
+    var disabledBridge = new JellixBridge(
+        environment.Application,
+        environment.Client,
+        UserManagerProxy.Create([disabled]));
+    await AssertBridgeRejectedAsync(() => disabledBridge.InvokeAsync(
+        "1",
+        "list",
+        disabled.Id.ToString("N"),
+        disabled.Username,
+        "{}",
+        CancellationToken.None), "A disabled Jellyfin user was accepted.");
+    await AssertBridgeRejectedAsync(() => bridge.InvokeAsync(
+        "1",
+        "list",
+        userAId.ToString("D"),
+        userA.Username,
+        "{}",
+        CancellationToken.None), "A non-N Jellyfin user ID was accepted.");
+    await AssertBridgeRejectedAsync(() => bridge.InvokeAsync(
+        "1",
+        "list",
+        userAId.ToString("N"),
+        userA.Username,
+        "{\"unexpected\":true}",
+        CancellationToken.None), "An unexpected bridge field was accepted.");
+    await AssertBridgeRejectedAsync(() => bridge.InvokeAsync(
+        "1",
+        "list",
+        userAId.ToString("N"),
+        userA.Username,
+        "{\"nested\":" + new string('[', 10) + "0" + new string(']', 10) + "}",
+        CancellationToken.None), "An overly deep bridge payload was accepted.");
+
+    var requestA = new CreateMediaRequest
+    {
+        Title = "Only A",
+        SeriesUrl = "https://example.invalid/series/a",
+        Source = "source-a",
+        MediaType = "series",
+        Episodes = ["https://example.invalid/episode/a"],
+        Language = "German Dub",
+        Provider = "VOE",
+    };
+    var requestB = new CreateMediaRequest
+    {
+        Title = "Only B",
+        SeriesUrl = "https://example.invalid/series/b",
+        Source = "source-a",
+        MediaType = "series",
+        Episodes = ["https://example.invalid/episode/b"],
+        Language = "German Dub",
+        Provider = "VOE",
+    };
+    await environment.Store.TryAddAsync(userAId.ToString("N"), userA.Username, requestA, RequestStatuses.Pending, 10, CancellationToken.None);
+    await environment.Store.TryAddAsync(userBId.ToString("N"), userB.Username, requestB, RequestStatuses.Pending, 10, CancellationToken.None);
+    var listJson = await bridge.InvokeAsync("1", "list", userAId.ToString("N"), "spoofed", "{}", CancellationToken.None);
+    Assert(listJson.Contains("Only A", StringComparison.Ordinal), "A user could not list their own request.");
+    Assert(!listJson.Contains("Only B", StringComparison.Ordinal), "A user could list another user's request.");
+
+    var submissionToken = environment.Tokens.Issue(
+        userAId.ToString("N"),
+        "series",
+        "Submitted Through Bridge",
+        "2026",
+        "source-a",
+        "https://example.invalid/series/bridge-submit");
+    var submitJson = await bridge.InvokeAsync(
+        "1",
+        "submit",
+        userAId.ToString("N"),
+        "spoofed-admin",
+        JsonSerializer.Serialize(new { selectionToken = submissionToken }),
+        CancellationToken.None);
+    using (var submit = JsonDocument.Parse(submitJson))
+    {
+        Assert(submit.RootElement.GetProperty("status").GetString() == "pending", "Bridge submit returned an unstable status.");
+    }
+
+    var stored = (await environment.Store.ListForUserAsync(userAId.ToString("N"), 500, CancellationToken.None))
+        .Single(item => item.Title == "Submitted Through Bridge");
+    Assert(stored.Username == userA.Username, "Bridge submission trusted the caller-supplied username.");
+
+    foreach (var mapping in new[]
+    {
+        (RequestStatuses.Pending, false, "pending"),
+        (RequestStatuses.Processing, false, "pending"),
+        (RequestStatuses.Queued, false, "queued"),
+        (RequestStatuses.Queued, true, "downloading"),
+        (RequestStatuses.Completed, false, "available"),
+        (RequestStatuses.Available, false, "available"),
+        (RequestStatuses.Partial, false, "failed"),
+        (RequestStatuses.Failed, false, "failed"),
+        (RequestStatuses.Cancelled, false, "failed"),
+        (RequestStatuses.Rejected, false, "rejected"),
+        (RequestStatuses.Withdrawn, false, "withdrawn"),
+    })
+    {
+        Assert(
+            JellixBridge.MapStatus(new MediaRequest { Status = mapping.Item1, QueueRunning = mapping.Item2 }) == mapping.Item3,
+            $"Bridge status mapping for {mapping.Item1} is unstable.");
+    }
+}
+
+static async Task TestSharedApplicationRulesAsync(string testRoot)
+{
+    var config = new PluginConfiguration
+    {
+        MediaForgeUrl = "http://mediaforge.invalid:8080",
+        MaxPendingRequestsPerUser = 10,
+    };
+    var environment = CreateApplicationEnvironment(testRoot, "shared-rules", config);
+    var sources = await environment.Application.GetAllowedSourcesAsync("user-a", CancellationToken.None, applyRateLimit: false);
+    Assert(sources.Select(item => item.Id).SequenceEqual(["source-a"]), "Disabled or adult sources crossed the shared source policy.");
+
+    environment.Handler.HealthStatus = System.Net.HttpStatusCode.Unauthorized;
+    var invalidKey = await environment.Client.CheckHealthAsync(CancellationToken.None);
+    Assert(invalidKey.Configured && !invalidKey.Healthy && !invalidKey.ApiKeyValid, "A 401 health response was not classified as an invalid API key.");
+    environment.Handler.HealthStatus = System.Net.HttpStatusCode.InternalServerError;
+    var unavailable = await environment.Client.CheckHealthAsync(CancellationToken.None);
+    Assert(unavailable.Configured && !unavailable.Healthy && unavailable.ApiKeyValid, "A non-authentication health failure was misreported as an invalid key.");
+    environment.Handler.HealthStatus = System.Net.HttpStatusCode.OK;
+
+    var search = await environment.Application.SearchAsync(
+        "user-a",
+        "Example",
+        "all",
+        "series",
+        issueSelectionTokens: true,
+        CancellationToken.None);
+    Assert(search.Items.Count == 1, "Shared Jellix search did not return the safe source result.");
+    Assert(search.Items[0].Token.Length <= 100, "Shared search returned an incompatible selection token.");
+    var serializedSearch = JsonSerializer.Serialize(new { items = search.Items });
+    Assert(!serializedSearch.Contains("example.invalid", StringComparison.OrdinalIgnoreCase), "Jellix search exposed an upstream URL.");
+    Assert(!serializedSearch.Contains("source-a", StringComparison.OrdinalIgnoreCase), "Jellix search exposed a MediaForge source identifier.");
+
+    config.MaintenanceMode = true;
+    var maintenanceToken = environment.Tokens.Issue(
+        "maintenance-user",
+        "series",
+        "Maintenance",
+        string.Empty,
+        "source-a",
+        "https://example.invalid/series/maintenance");
+    var maintenanceRejected = false;
+    try
+    {
+        await environment.Application.SubmitSelectionAsync(
+            "maintenance-user",
+            "Maintenance User",
+            maintenanceToken,
+            CancellationToken.None);
+    }
+    catch (MediaForgeApplicationException exception) when (exception.StatusCode == System.Net.HttpStatusCode.ServiceUnavailable)
+    {
+        maintenanceRejected = true;
+    }
+
+    Assert(maintenanceRejected, "Jellix submission bypassed connector maintenance mode.");
+    config.MaintenanceMode = false;
+
+    var duplicateTokens = Enumerable.Range(0, 2).Select(_ => environment.Tokens.Issue(
+        "duplicate-user",
+        "series",
+        "Duplicate Show",
+        "2026",
+        "source-a",
+        "https://example.invalid/series/duplicate")).ToArray();
+    var duplicateResults = await Task.WhenAll(duplicateTokens.Select(token => environment.Application.SubmitSelectionAsync(
+        "duplicate-user",
+        "Duplicate User",
+        token,
+        CancellationToken.None)));
+    Assert(duplicateResults.Count(item => item.Disposition == SubmitDisposition.Stored) == 1, "Concurrent shared submission did not store exactly one request.");
+    Assert(duplicateResults.Count(item => item.Disposition == SubmitDisposition.Duplicate) == 1, "Concurrent shared submission did not report its duplicate.");
+
+    var limitedConfig = new PluginConfiguration
+    {
+        MediaForgeUrl = "http://mediaforge.invalid:8080",
+        MaxPendingRequestsPerUser = 1,
+    };
+    var limited = CreateApplicationEnvironment(testRoot, "user-limit", limitedConfig);
+    foreach (var index in Enumerable.Range(1, 2))
+    {
+        var token = limited.Tokens.Issue(
+            "limited-user",
+            "series",
+            $"Limited {index}",
+            string.Empty,
+            "source-a",
+            $"https://example.invalid/series/limited-{index}");
+        var result = await limited.Application.SubmitSelectionAsync("limited-user", "Limited", token, CancellationToken.None);
+        Assert(
+            index == 1 ? result.Disposition == SubmitDisposition.Stored : result.Disposition == SubmitDisposition.LimitReached,
+            "Shared submission did not apply the configured per-user limit.");
+    }
+
+    var capacity = CreateApplicationEnvironment(testRoot, "store-capacity", config, maxStoredRequests: 1);
+    foreach (var index in Enumerable.Range(1, 2))
+    {
+        var token = capacity.Tokens.Issue(
+            "capacity-user",
+            "series",
+            $"Capacity {index}",
+            string.Empty,
+            "source-a",
+            $"https://example.invalid/series/capacity-{index}");
+        var result = await capacity.Application.SubmitSelectionAsync("capacity-user", "Capacity", token, CancellationToken.None);
+        Assert(
+            index == 1 ? result.Disposition == SubmitDisposition.Stored : result.Disposition == SubmitDisposition.StoreCapacityReached,
+            "Shared submission did not enforce request-store capacity.");
+    }
+}
+
+static ApplicationTestEnvironment CreateApplicationEnvironment(
+    string testRoot,
+    string name,
+    PluginConfiguration configuration,
+    int maxStoredRequests = 20_000)
+{
+    var root = Path.Combine(testRoot, name);
+    var secret = new SecretStore(Path.Combine(root, "secrets"));
+    secret.SetApiKey("test-secret-key");
+    var handler = new FakeMediaForgeHandler();
+    var client = new MediaForgeClient(new HttpClient(handler), secret, () => configuration);
+    var store = new RequestStore(Path.Combine(root, "requests"), maxStoredRequests, 64L * 1024 * 1024);
+    var tokens = new JellixSelectionTokenStore();
+    var application = new MediaForgeRequestApplicationService(
+        client,
+        store,
+        new MediaAccessGrantStore(),
+        new UserRateLimiter(),
+        new JellyfinLibraryAvailabilityService(LibraryManagerProxy.Create(_ => [])),
+        tokens,
+        () => configuration);
+    return new ApplicationTestEnvironment(application, client, store, tokens, handler);
+}
+
+static async Task AssertBridgeRejectedAsync(Func<Task<string>> action, string message)
+{
+    try
+    {
+        _ = await action();
+    }
+    catch (MediaForgeApplicationException)
+    {
+        return;
+    }
+
+    throw new InvalidOperationException(message);
 }
 
 static async Task TestRequestStoreAsync(string testRoot)
@@ -794,6 +1192,95 @@ static void Assert(bool condition, string message)
     if (!condition)
     {
         throw new InvalidOperationException(message);
+    }
+}
+
+public sealed record ApplicationTestEnvironment(
+    MediaForgeRequestApplicationService Application,
+    MediaForgeClient Client,
+    RequestStore Store,
+    JellixSelectionTokenStore Tokens,
+    FakeMediaForgeHandler Handler);
+
+public sealed class FakeMediaForgeHandler : HttpMessageHandler
+{
+    public int RequestCount { get; private set; }
+
+    public System.Net.HttpStatusCode HealthStatus { get; set; } = System.Net.HttpStatusCode.OK;
+
+    protected override Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request,
+        CancellationToken cancellationToken)
+    {
+        RequestCount++;
+        if (!request.Headers.TryGetValues("X-Api-Key", out var values)
+            || values.SingleOrDefault() != "test-secret-key")
+        {
+            return Json(System.Net.HttpStatusCode.Unauthorized, "{\"error\":\"authentication required\"}");
+        }
+
+        var path = request.RequestUri?.AbsolutePath ?? string.Empty;
+        return path switch
+        {
+            "/api/v1/connector/health" => Json(
+                HealthStatus,
+                HealthStatus == System.Net.HttpStatusCode.OK ? "{\"ok\":true}" : "{\"error\":\"safe\"}"),
+            "/api/v1/connector/sources" => Json(System.Net.HttpStatusCode.OK, """
+                {
+                  "sources": [
+                    {"id":"source-a","label":"Safe Source","adult":false,"enabled":true,"media_types":["series"]},
+                    {"id":"adult","label":"Adult","adult":true,"enabled":true,"media_types":["series"]},
+                    {"id":"disabled","label":"Disabled","adult":false,"enabled":false,"media_types":["series"]}
+                  ]
+                }
+                """),
+            "/api/v1/connector/search" => Json(System.Net.HttpStatusCode.OK, """
+                {"results":[{"title":"Search Result","url":"https://example.invalid/series/search-result","year":"2026","media_type":"series"}]}
+                """),
+            "/api/v1/connector/series" => Json(System.Net.HttpStatusCode.OK, """
+                {"title":"Submitted Through Bridge","description":"Safe","is_movie":false,"year":2026,"tvdb_id":"12345"}
+                """),
+            "/api/v1/connector/seasons" => Json(System.Net.HttpStatusCode.OK, """
+                {"seasons":[{"url":"https://example.invalid/season/1","season_number":1,"episode_count":1}]}
+                """),
+            "/api/v1/connector/episodes" => Json(System.Net.HttpStatusCode.OK, """
+                {"episodes":[{"url":"https://example.invalid/episode/1","season_number":1,"episode_number":1,"languages":["German Dub"]}]}
+                """),
+            "/api/v1/connector/providers" => Json(System.Net.HttpStatusCode.OK, "{\"German Dub\":[\"VOE\"]}"),
+            "/api/v1/connector/progress" => Json(System.Net.HttpStatusCode.OK, "{\"items\":[]}"),
+            "/api/v1/connector/download" => Json(System.Net.HttpStatusCode.OK, "{\"queue_id\":42,\"accepted_episode_count\":1}"),
+            _ => Json(System.Net.HttpStatusCode.NotFound, "{\"error\":\"not found\"}"),
+        };
+    }
+
+    private static Task<HttpResponseMessage> Json(System.Net.HttpStatusCode status, string json)
+        => Task.FromResult(new HttpResponseMessage(status)
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json"),
+        });
+}
+
+public class UserManagerProxy : DispatchProxy
+{
+    private IReadOnlyDictionary<Guid, User> _users = new Dictionary<Guid, User>();
+
+    public static IUserManager Create(IEnumerable<User> users)
+    {
+        var manager = Create<IUserManager, UserManagerProxy>();
+        ((UserManagerProxy)(object)manager)._users = users.ToDictionary(user => user.Id);
+        return manager;
+    }
+
+    protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
+    {
+        if (targetMethod?.Name == nameof(IUserManager.GetUserById)
+            && args is { Length: 1 }
+            && args[0] is Guid id)
+        {
+            return _users.GetValueOrDefault(id);
+        }
+
+        throw new NotSupportedException($"Unexpected IUserManager call: {targetMethod?.Name}");
     }
 }
 

@@ -14,7 +14,7 @@ public sealed class PluginServiceRegistrator : IPluginServiceRegistrator
             .AddHttpClient<MediaForgeClient>(client =>
             {
                 client.Timeout = TimeSpan.FromSeconds(90);
-                client.DefaultRequestHeaders.UserAgent.ParseAdd("Jellyfin-MediaForge-Requests/0.3.4");
+                client.DefaultRequestHeaders.UserAgent.ParseAdd("Jellyfin-MediaForge-Requests/0.4.0");
             })
             .RedactLoggedHeaders(["X-Api-Key"])
             .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
@@ -29,8 +29,11 @@ public sealed class PluginServiceRegistrator : IPluginServiceRegistrator
             });
         serviceCollection.AddSingleton<RequestStore>();
         serviceCollection.AddSingleton<MediaAccessGrantStore>();
+        serviceCollection.AddSingleton<JellixSelectionTokenStore>();
         serviceCollection.AddSingleton<UserRateLimiter>();
         serviceCollection.AddSingleton<JellyfinLibraryAvailabilityService>();
+        serviceCollection.AddSingleton<MediaForgeRequestApplicationService>();
+        serviceCollection.AddSingleton<Jellyfin.Plugin.MediaForge.Integration.JellixBridge>();
         serviceCollection.AddSingleton(serviceProvider =>
             Plugin.Instance?.Secrets
             ?? throw new InvalidOperationException("MediaForge secret store is unavailable."));

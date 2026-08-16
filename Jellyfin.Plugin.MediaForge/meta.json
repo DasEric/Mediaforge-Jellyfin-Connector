@@ -1,14 +1,14 @@
 {
   "category": "General",
-  "changelog": "v0.3.4\n- Honor MediaForge's configured per-site default download paths for Jellyfin requests\n- Keep MediaForge's global download path when a site has no custom default\n- Refuse queue submission if target-path resolution fails and keep validation compliant with the release linter",
+  "changelog": "v0.4.0\n- Add the versioned in-process Jellix bridge for search, submission, status and progress\n- Share request planning, source policy, limits, duplicate checks and persistence between HTTP and Jellix\n- Add user-bound, short-lived one-time selection tokens without exposing MediaForge URLs\n- Add bridge contract, isolation, concurrency and security regression tests",
   "description": "Searches the movie and TV sources enabled in MediaForge directly from Jellyfin. Users can request downloads; administrators can approve them or enable automatic mode.",
   "guid": "2ea7f67d-8e4d-4c84-bd5a-a5bcd713bb23",
   "name": "MediaForge Requests",
   "overview": "MediaForge search and download requests for all Jellyfin users",
   "owner": "MediaForge Jellyfin Connector contributors",
   "targetAbi": "10.11.0.0",
-  "timestamp": "2026-08-15T00:00:00Z",
-  "version": "0.3.4.0",
+  "timestamp": "2026-08-16T00:00:00Z",
+  "version": "0.4.0.0",
   "status": "Active",
   "autoUpdate": true
 }

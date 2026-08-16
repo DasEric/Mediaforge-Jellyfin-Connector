@@ -21,15 +21,52 @@ public sealed class MediaForgeClient
     };
     private readonly HttpClient _httpClient;
     private readonly SecretStore _secrets;
+    private readonly Func<Configuration.PluginConfiguration?> _configuration;
 
     public MediaForgeClient(HttpClient httpClient, SecretStore secrets)
+        : this(httpClient, secrets, () => Plugin.Instance?.Configuration)
+    {
+    }
+
+    internal MediaForgeClient(
+        HttpClient httpClient,
+        SecretStore secrets,
+        Func<Configuration.PluginConfiguration?> configuration)
     {
         _httpClient = httpClient;
         _secrets = secrets;
+        _configuration = configuration;
     }
 
     public Task<JsonElement> GetHealthAsync(CancellationToken cancellationToken)
         => SendAsync(HttpMethod.Get, "api/v1/connector/health", null, cancellationToken);
+
+    /// <summary>Returns a sanitized connector diagnostic without exposing secrets or upstream bodies.</summary>
+    public async Task<MediaForgeConnectionStatus> CheckHealthAsync(CancellationToken cancellationToken)
+    {
+        var config = _configuration();
+        var configured = config is not null
+            && _secrets.HasApiKey
+            && IsValidBaseUrl(config.MediaForgeUrl);
+        if (!configured)
+        {
+            return new MediaForgeConnectionStatus(false, false, false);
+        }
+
+        try
+        {
+            var response = await GetHealthAsync(cancellationToken).ConfigureAwait(false);
+            var healthy = response.ValueKind == JsonValueKind.Object
+                && response.TryGetProperty("ok", out var ok)
+                && ok.ValueKind == JsonValueKind.True;
+            return new MediaForgeConnectionStatus(healthy, true, true);
+        }
+        catch (MediaForgeException exception)
+        {
+            var authenticationFailed = exception.UpstreamStatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden;
+            return new MediaForgeConnectionStatus(false, true, !authenticationFailed);
+        }
+    }
 
     public Task<JsonElement> GetSourcesAsync(CancellationToken cancellationToken)
         => SendAsync(HttpMethod.Get, "api/v1/connector/sources", null, cancellationToken);
@@ -86,7 +123,7 @@ public sealed class MediaForgeClient
         using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutSource.CancelAfter(TimeSpan.FromSeconds(30));
         var requestToken = timeoutSource.Token;
-        var config = Plugin.Instance?.Configuration
+        var config = _configuration()
             ?? throw new MediaForgeException(HttpStatusCode.ServiceUnavailable, "Plugin-Konfiguration ist nicht verfügbar.");
         var apiKey = _secrets.GetApiKey();
         if (apiKey is null)
@@ -213,7 +250,7 @@ public sealed class MediaForgeClient
         using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutSource.CancelAfter(timeout ?? TimeSpan.FromSeconds(90));
         var requestToken = timeoutSource.Token;
-        var config = Plugin.Instance?.Configuration
+        var config = _configuration()
             ?? throw new MediaForgeException(HttpStatusCode.ServiceUnavailable, "Plugin-Konfiguration ist nicht verfügbar.");
         var apiKey = _secrets.GetApiKey();
         if (apiKey is null)
@@ -316,6 +353,19 @@ public sealed class MediaForgeClient
         return new Uri(root.AbsoluteUri.TrimEnd('/') + "/" + relativePath.TrimStart('/'), UriKind.Absolute);
     }
 
+    private static bool IsValidBaseUrl(string baseUrl)
+    {
+        try
+        {
+            _ = BuildUri(baseUrl, "api/v1/connector/health");
+            return true;
+        }
+        catch (MediaForgeException)
+        {
+            return false;
+        }
+    }
+
     private static MediaForgeException SafeUpstreamError(HttpStatusCode statusCode)
     {
         return statusCode switch
@@ -323,7 +373,8 @@ public sealed class MediaForgeClient
             HttpStatusCode.BadRequest => new(statusCode, "MediaForge hat die Anfrage abgelehnt."),
             HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden => new(
                 HttpStatusCode.BadGateway,
-                "MediaForge-Authentifizierung oder API-Berechtigungen sind ungültig."),
+                "MediaForge-Authentifizierung oder API-Berechtigungen sind ungültig.",
+                statusCode),
             HttpStatusCode.NotFound => new(statusCode, "Der angeforderte Inhalt wurde in MediaForge nicht gefunden."),
             HttpStatusCode.TooManyRequests => new(statusCode, "MediaForge begrenzt derzeit weitere Anfragen. Bitte später erneut versuchen."),
             HttpStatusCode.ServiceUnavailable => new(statusCode, "MediaForge ist derzeit nicht verfügbar."),
@@ -337,14 +388,24 @@ public sealed record MediaForgeImage(byte[] Data, string MediaType);
 /// <summary>Verified queue metadata returned by the MediaForge connector.</summary>
 public sealed record MediaForgeQueueResult(long QueueId, int? AcceptedEpisodeCount);
 
+/// <summary>Sanitized connection state for optional in-process integrations.</summary>
+public sealed record MediaForgeConnectionStatus(bool Healthy, bool Configured, bool ApiKeyValid);
+
 /// <summary>Error returned while talking to MediaForge.</summary>
 public sealed class MediaForgeException : Exception
 {
-    public MediaForgeException(HttpStatusCode statusCode, string message)
+    public MediaForgeException(
+        HttpStatusCode statusCode,
+        string message,
+        HttpStatusCode? upstreamStatusCode = null)
         : base(message)
     {
         StatusCode = statusCode;
+        UpstreamStatusCode = upstreamStatusCode;
     }
 
     public HttpStatusCode StatusCode { get; }
+
+    /// <summary>Gets an upstream status only when it is safe and required for internal classification.</summary>
+    public HttpStatusCode? UpstreamStatusCode { get; }
 }

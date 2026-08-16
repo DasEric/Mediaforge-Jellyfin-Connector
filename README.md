@@ -41,6 +41,20 @@ MediaForge changes its internal Web UI endpoints more frequently than its
 versioned API. The companion module keeps this dependency on the MediaForge
 side and exposes an API-key-protected interface to the Jellyfin plugin.
 
+### Optional Jellix integration
+
+Version 0.4.0 adds protocol-v1 compatibility with the optional
+`Jellix-for-Jellyfin` plugin. Jellix discovers the concrete in-process bridge
+`Jellyfin.Plugin.MediaForge.Integration.JellixBridge` after both Jellyfin
+plugins have been installed and Jellyfin has been restarted. No shared contract
+DLL and no additional API key are required.
+
+Jellix can search, submit requests, list the linked Jellyfin user's requests,
+and monitor download state. Search selections use short-lived, user-bound,
+single-use opaque tokens. Jellix never receives MediaForge URLs, episode lists,
+the connector API key, or direct access to `requests.json`; both Jellyfin UIs
+use the same request application service and atomic request store.
+
 ## Requirements
 
 - Jellyfin 10.11 or later
