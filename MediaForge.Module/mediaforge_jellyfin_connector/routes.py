@@ -162,7 +162,7 @@ def _read_source_policy(response):
             isinstance(item, dict)
             and _safe_text(source_id, 80)
             and source_key not in seen_source_ids
-            and isinstance(item.get("adult"), bool)
+            and isinstance(item.get("adult", False), bool)
             and isinstance(item.get("enabled", True), bool)
         ):
             seen_source_ids.add(source_key)
@@ -345,7 +345,7 @@ def create_blueprint(app, enabled_setting_key: str, module_version: str = "unkno
         payload["sources"] = [
             item
             for item in payload["sources"]
-            if not item["adult"] and item.get("enabled", True) is not False
+            if not item.get("adult", False) and item.get("enabled", True) is not False
         ]
         visible_ids = {item["id"] for item in payload["sources"]}
         if isinstance(payload.get("order"), list):
