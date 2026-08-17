@@ -195,7 +195,14 @@ export default function (view, params) {
     setOptions(q('language'), [state.status.defaultLanguage || 'German Dub'], state.status.defaultLanguage);
     setOptions(q('provider'), [state.status.defaultProvider || 'VOE'], state.status.defaultProvider);
     try {
-      const payload = { title: item.title || item.name || 'Unbekannter Titel', seriesUrl: rawUrl, source, mediaType: item.media_type === 'movie' ? 'movie' : 'series' };
+      let type = item.media_type === 'movie' ? 'movie' : 'series';
+      if (!item.media_type) {
+        const sourceObj = state.sources.find((s) => s.id === source);
+        if (sourceObj && Array.isArray(sourceObj.media_types) && sourceObj.media_types.length === 1 && sourceObj.media_types[0] === 'movie') {
+          type = 'movie';
+        }
+      }
+      const payload = { title: item.title || item.name || 'Unbekannter Titel', seriesUrl: rawUrl, source, mediaType: type };
       const plan = await call('Requests/Plan', { method: 'POST', body: payload });
       if (generation !== detailGeneration) return;
       state.detail = Object.assign(payload, { title: plan.title || payload.title, plan });
