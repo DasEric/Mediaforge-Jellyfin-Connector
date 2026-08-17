@@ -779,19 +779,21 @@ public sealed class MediaForgeRequestApplicationService
 
             var id = ReadJsonString(item, "id", 80);
             var label = ReadJsonString(item, "label", 200);
-            var hasAdult = item.TryGetProperty("adult", out var adultValue)
-                && adultValue.ValueKind is JsonValueKind.True or JsonValueKind.False;
             var hasEnabled = item.TryGetProperty("enabled", out var enabledValue);
             var validEnabled = !hasEnabled || enabledValue.ValueKind is JsonValueKind.True or JsonValueKind.False;
             var enabled = validEnabled && (!hasEnabled || enabledValue.ValueKind == JsonValueKind.True);
-            var adult = hasAdult && adultValue.ValueKind == JsonValueKind.True;
+            var adult = item.TryGetProperty("adult", out var adultValue)
+                && adultValue.ValueKind == JsonValueKind.True;
             var mediaTypes = ReadMediaTypes(item);
-            if (!hasAdult
-                || !validEnabled
+            if (mediaTypes.Count == 0)
+            {
+                mediaTypes = ["movie", "series"];
+            }
+
+            if (!validEnabled
                 || string.IsNullOrWhiteSpace(id)
                 || !enabled
                 || adult
-                || mediaTypes.Count == 0
                 || (allowlist.Count > 0 && !allowlist.Contains(id))
                 || !seen.Add(id))
             {

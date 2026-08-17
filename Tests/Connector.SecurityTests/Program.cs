@@ -246,8 +246,20 @@ static void TestApiJsonContracts()
     var filteredSources = readSources.Invoke(null, [malformedSources.RootElement, new PluginConfiguration()]);
     using var filteredDocument = JsonDocument.Parse(JsonSerializer.Serialize(filteredSources));
     var filteredArray = filteredDocument.RootElement;
-    Assert(filteredArray.GetArrayLength() == 1, "Malformed or duplicate MediaForge sources were not rejected.");
-    Assert(filteredArray[0].GetProperty("id").GetString() == "ok", "The valid source was lost during filtering.");
+    Assert(filteredArray.GetArrayLength() == 2, "Malformed or duplicate MediaForge sources were not rejected.");
+    Assert(filteredArray[0].GetProperty("id").GetString() == "adult-unknown", "A source with a non-boolean adult field was incorrectly rejected.");
+    Assert(filteredArray[1].GetProperty("id").GetString() == "ok", "The valid source was lost during filtering.");
+
+    // Sources without "adult" or "media_types" fields must not be silently dropped.
+    using var sparseSource = JsonDocument.Parse(
+        """{"sources":[{"id":"sparse","label":"Sparse Source","enabled":true}]}""");
+    var sparseFiltered = readSources.Invoke(null, [sparseSource.RootElement, new PluginConfiguration()]);
+    using var sparseDocument = JsonDocument.Parse(JsonSerializer.Serialize(sparseFiltered));
+    Assert(sparseDocument.RootElement.GetArrayLength() == 1,
+        "A source without adult/media_types fields was incorrectly rejected.");
+    var sparseMediaTypes = sparseDocument.RootElement[0].GetProperty("media_types");
+    Assert(sparseMediaTypes.GetArrayLength() == 2,
+        "A source without media_types did not receive the default fallback.");
 }
 
 static void TestPosterProxyContract()
