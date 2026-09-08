@@ -38,6 +38,7 @@ try
     TestPluginPageRegistration();
     TestRequestPageContract();
     TestWebInjection();
+    TestWebConfigMenuLink();
     TestMediaGrants();
     TestJellixSelectionTokens();
     TestRateLimiter();
@@ -85,6 +86,37 @@ static void TestWebInjection()
     Assert(script.Contains("document.createElement('li')", StringComparison.Ordinal), "The Modern drawer entry is not a semantic MUI list item.");
     Assert(script.Contains("item.appendChild(modern)", StringComparison.Ordinal), "The Modern drawer link is not wrapped in its list item.");
     Assert(script.Contains("if (!modernDrawer)", StringComparison.Ordinal), "The Modern mobile drawer cannot receive its close event.");
+    Assert(script.Contains("#/mediaforge-requests", StringComparison.Ordinal), "The Jellyfin 12 native menu target is missing.");
+    Assert(script.Contains("handleOfficialLink", StringComparison.Ordinal), "The native menu link is not intercepted in-page.");
+}
+
+static void TestWebConfigMenuLink()
+{
+    const string original = "{\"multiserver\":true,\"menuLinks\":[{\"name\":\"Existing\",\"icon\":\"home\",\"url\":\"https://example.test\"}]}";
+    var enabled = WebConfigMenuLink.ApplyToJson(original, "Anfragen", "playlist_add", "#/mediaforge-requests", true);
+    Assert(enabled.Contains("#/mediaforge-requests", StringComparison.Ordinal), "Jellyfin 12 menu link was not added.");
+    Assert(enabled.Contains("https://example.test", StringComparison.Ordinal), "An existing custom menu link was removed.");
+    Assert(enabled == WebConfigMenuLink.ApplyToJson(enabled, "Anfragen", "playlist_add", "#/mediaforge-requests", true), "Menu link update was not idempotent.");
+
+    const string duplicate = "{\"menuLinks\":[{\"name\":\"Old\",\"url\":\"#/mediaforge-requests\"},{\"name\":\"Old again\",\"url\":\"#/mediaforge-requests\"}]}";
+    var deduplicated = WebConfigMenuLink.ApplyToJson(duplicate, "Anfragen", "playlist_add", "#/mediaforge-requests", true);
+    Assert(deduplicated.Split("#/mediaforge-requests", StringSplitOptions.None).Length - 1 == 1, "Duplicate menu links were not removed.");
+
+    var disabled = WebConfigMenuLink.ApplyToJson(enabled, "Anfragen", "playlist_add", "#/mediaforge-requests", false);
+    Assert(!disabled.Contains("#/mediaforge-requests", StringComparison.Ordinal), "Disabled menu link was not removed.");
+    Assert(disabled.Contains("https://example.test", StringComparison.Ordinal), "Disabling removed another custom link.");
+    Assert(disabled == WebConfigMenuLink.ApplyToJson(disabled, "Anfragen", "playlist_add", "#/mediaforge-requests", false), "Disabled update was not idempotent.");
+    var invalidRejected = false;
+    try
+    {
+        WebConfigMenuLink.ApplyToJson("{\"menuLinks\":{}}", "Anfragen", "playlist_add", "#/mediaforge-requests", true);
+    }
+    catch (InvalidDataException)
+    {
+        invalidRejected = true;
+    }
+
+    Assert(invalidRejected, "An invalid menuLinks shape would have been overwritten.");
 }
 
 static void TestPluginPageRegistration()

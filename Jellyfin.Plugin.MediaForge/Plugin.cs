@@ -17,6 +17,7 @@ public sealed class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
 {
     public const string PluginGuid = "2ea7f67d-8e4d-4c84-bd5a-a5bcd713bb23";
     private const string PluginDisplayName = "MediaForge Requests";
+    private const string MenuLinkUrl = "#/mediaforge-requests";
     private const int TransformationRetries = 30;
     private readonly IApplicationPaths _applicationPaths;
     private int _transformationRegistered;
@@ -79,13 +80,29 @@ public sealed class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
 
     private string IndexHtmlPath => Path.Combine(_applicationPaths.WebPath, "index.html");
 
+    private string WebConfigPath => Path.Combine(_applicationPaths.WebPath, "config.json");
+
     private void EnableWebInjection()
     {
         UpdateIndexHtml(inject: true);
+        UpdateMenuLink(enabled: true);
         if (Volatile.Read(ref _transformationRegistered) == 0
             && Interlocked.CompareExchange(ref _transformationRegistrationInProgress, 1, 0) == 0)
         {
             _ = Task.Run(RegisterWebInjectionAsync);
+        }
+    }
+
+    private void UpdateMenuLink(bool enabled)
+    {
+        try
+        {
+            WebConfigMenuLink.UpdateFile(WebConfigPath, "Anfragen", "playlist_add", MenuLinkUrl, enabled);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException or Newtonsoft.Json.JsonException)
+        {
+            // The legacy/mobile DOM integration remains available when web config is read-only.
+            Console.Error.WriteLine("[MediaForge Requests] Could not update jellyfin-web/config.json: " + exception.Message);
         }
     }
 
@@ -204,7 +221,11 @@ public sealed class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
         }
     }
 
-    public void CleanupInjection() => UpdateIndexHtml(inject: false);
+    public void CleanupInjection()
+    {
+        UpdateIndexHtml(inject: false);
+        UpdateMenuLink(enabled: false);
+    }
 
     private bool MigrateLegacySecret(PluginConfiguration configuration)
     {

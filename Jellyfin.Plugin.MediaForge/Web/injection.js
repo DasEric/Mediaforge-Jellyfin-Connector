@@ -3,6 +3,7 @@
   const MENU_ID = 'mediaforge-requests-sidebar';
   const MODERN_MENU_ID = 'mediaforge-requests-modern-sidebar';
   const MODAL_ID = 'mediaforge-requests-modal';
+  const OFFICIAL_LINK_HASH = '#/mediaforge-requests';
   function api() { return typeof ApiClient !== 'undefined' ? ApiClient : window.ApiClient; }
   function inject() {
     if (!api()) return;
@@ -34,6 +35,12 @@
     entry.addEventListener('click', function (event) { event.preventDefault(); const modernDrawer = entry.closest && entry.closest('.MuiDrawer-paper'); if (!modernDrawer) { event.stopPropagation(); const backdrop = document.querySelector('.mainDrawer-backdrop'); if (backdrop) backdrop.click(); } open(); });
     return entry;
   }
+  function handleOfficialLink(event) {
+    const anchor = event.target && event.target.closest ? event.target.closest('a[href]') : null;
+    if (!anchor || new URL(anchor.href, document.baseURI).hash !== OFFICIAL_LINK_HASH) return;
+    event.preventDefault();
+    open();
+  }
   async function open() {
     const old = document.getElementById(MODAL_ID); if (old) old.remove();
     const overlay = document.createElement('div'); overlay.id = MODAL_ID; overlay.style.cssText = 'position:fixed;inset:0;z-index:999;background:#181818;overflow:auto;'; overlay.innerHTML = '<div style="position:sticky;top:0;z-index:5;display:flex;justify-content:flex-end;padding:.5rem;background:#111"><button type="button" aria-label="Schließen" style="border:0;background:transparent;color:#fff;font-size:2rem;cursor:pointer">×</button></div><div data-content><div style="padding:3rem;text-align:center">Laden…</div></div>';
@@ -44,6 +51,6 @@
       const module = await import(client.getUrl('MediaForgeRequests/PageScript') + '?v=' + Date.now()); if (module.default) module.default(content, { sidebar: true });
     } catch (error) { content.textContent = 'MediaForge Requests konnte nicht geladen werden.'; }
   }
-  function start() { const observer = new MutationObserver(inject); observer.observe(document.body, { childList: true, subtree: true }); inject(); }
+  function start() { document.addEventListener('click', handleOfficialLink, true); const observer = new MutationObserver(inject); observer.observe(document.body, { childList: true, subtree: true }); inject(); }
   let attempts = 0; const timer = setInterval(function () { if (api() || attempts++ > 100) { clearInterval(timer); if (api()) document.readyState === 'loading' ? document.addEventListener('DOMContentLoaded', start) : start(); } }, 200);
 })();

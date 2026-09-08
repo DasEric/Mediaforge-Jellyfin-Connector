@@ -133,16 +133,19 @@ configuration.
 
 ### 3. Make the page visible to regular users
 
-**Show in the sidebar for all Jellyfin users** is enabled by default. Reload
+**Show in Jellyfin navigation for all users** is enabled by default. Reload
 already open Jellyfin Web clients after changing this setting. If the Jellyfin
 **File Transformation** plugin is installed, its runtime patch is used.
 Otherwise, this plugin modifies Jellyfin's `index.html` as a fallback. Another
 server restart may therefore be required after a Jellyfin Web update.
 
-The **Requests** item is added to both Jellyfin 12's Modern drawer and the
-Legacy hamburger menu and is therefore available to all signed-in users. An
-observer adds it again if Jellyfin renders a new navigation drawer during
-navigation.
+The plugin also registers
+`{"name":"Anfragen","icon":"playlist_add","url":"#/mediaforge-requests"}`
+in Jellyfin Web's `config.json`. Jellyfin 12 renders the native link in the
+Modern desktop app bar, its overflow menu, and the mobile drawer. The existing
+Legacy integration remains available and unrelated custom links are preserved.
+If `config.json` is mounted read-only, add that object to `menuLinks` manually;
+the server log reports the failed automatic update.
 
 ## Custom Jellyfin repository and automatic updates
 
