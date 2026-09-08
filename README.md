@@ -1,5 +1,7 @@
 # MediaForge Jellyfin Connector
 
+Developed by **Eric**.
+
 A Jellyfin plugin that allows **all signed-in Jellyfin users** to search the
 movie and TV sources enabled in MediaForge.
 

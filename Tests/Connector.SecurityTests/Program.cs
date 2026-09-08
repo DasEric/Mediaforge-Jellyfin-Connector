@@ -87,7 +87,12 @@ static void TestWebInjection()
     Assert(script.Contains("item.appendChild(modern)", StringComparison.Ordinal), "The Modern drawer link is not wrapped in its list item.");
     Assert(script.Contains("if (!modernDrawer)", StringComparison.Ordinal), "The Modern mobile drawer cannot receive its close event.");
     Assert(script.Contains("#/mediaforge-requests", StringComparison.Ordinal), "The Jellyfin 12 native menu target is missing.");
-    Assert(script.Contains("handleOfficialLink", StringComparison.Ordinal), "The native menu link is not intercepted in-page.");
+    Assert(script.Contains("handleDocumentClick", StringComparison.Ordinal), "The native menu link is not intercepted in-page.");
+    Assert(script.Contains("__mediaForgeRequestsInjection", StringComparison.Ordinal), "Repeated script injection can register duplicate handlers.");
+    Assert(script.Contains("closeRequests", StringComparison.Ordinal), "The request overlay has no centralized close lifecycle.");
+    Assert(script.Contains("HISTORY_UPDATE", StringComparison.Ordinal), "Modern Jellyfin navigation does not close the request overlay.");
+    Assert(script.Contains("data-mediaforge-close", StringComparison.Ordinal), "The outer close button is not addressed explicitly.");
+    Assert(script.Contains("ResizeObserver", StringComparison.Ordinal), "The overlay does not track Jellyfin app-bar height changes.");
 }
 
 static void TestWebConfigMenuLink()
@@ -153,7 +158,7 @@ static void TestRequestPageContract()
     Assert(script.Contains("source: item.id", StringComparison.Ordinal), "All-source searches are not issued independently per MediaForge source.");
     Assert(script.Contains("Weitere Quellen werden durchsucht", StringComparison.Ordinal), "Progressive search does not communicate outstanding sources.");
     Assert(script.Contains("detailGeneration", StringComparison.Ordinal), "Stale detail requests can overwrite the active dialog.");
-    Assert(script.Contains("if (generation === detailGeneration) q('request').disabled = false", StringComparison.Ordinal), "An older request can mutate a newer dialog.");
+    Assert(script.Contains("if (!disposed && generation === detailGeneration && view.isConnected) q('request').disabled = false", StringComparison.Ordinal), "An older or disposed request can mutate the active dialog.");
     Assert(script.Contains("response.clone().json()", StringComparison.Ordinal), "Structured API errors are not shown to users.");
     Assert(script.Contains("available: 'Bereits in Jellyfin vorhanden'", StringComparison.Ordinal), "Approval-time availability is not represented in the UI.");
     Assert(script.Contains("items.some((item) => item.status === 'queued')", StringComparison.Ordinal), "A temporary progress error permanently stops polling queued downloads.");

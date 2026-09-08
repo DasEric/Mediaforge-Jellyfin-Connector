@@ -17,6 +17,10 @@ test('polling pauses outside a visible connected request view', () => {
   assert.match(source, /view\.addEventListener\('viewhide'/);
   assert.match(source, /stopMinePolling\(\)/);
   assert.match(source, /removeEventListener\('visibilitychange', onVisibilityChange\)/);
+  assert.match(source, /return function dispose\(\)/);
+  assert.match(source, /if \(discoverTimer\) clearTimeout\(discoverTimer\)/);
+  assert.match(source, /searchGeneration\+\+/);
+  assert.match(source, /detailGeneration\+\+/);
 });
 
 test('structural updates preserve the visible request anchor', () => {

@@ -1,5 +1,7 @@
 # MediaForge Module: Jellyfin Connector
 
+Developer: **Eric**
+
 This companion module adds API-key-protected endpoints to MediaForge for
 searching, resolving titles, seasons, and episodes, and queueing downloads. It
 uses the same handlers as the MediaForge Web UI internally, so the sources,

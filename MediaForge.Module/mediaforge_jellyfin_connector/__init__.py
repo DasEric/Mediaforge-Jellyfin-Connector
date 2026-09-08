@@ -19,9 +19,9 @@ MODULE_DESCRIPTION_DE = (
     "Authentifizierte Such-, Metadaten- und Warteschlangen-Endpunkte für "
     "das Jellyfin-Plugin MediaForge Requests."
 )
-MODULE_AUTHOR = "MediaForge Jellyfin Connector contributors"
+MODULE_AUTHOR = "Eric"
 MODULE_ENABLED_DEFAULT = True
-MODULE_VERSION = "0.5.1"
+MODULE_VERSION = "0.5.2"
 MODULE_API_VERSION = 1
 MODULE_MIN_APP_VERSION = "1.5.0"
 MODULE_MAX_APP_VERSION = "1.6.999"

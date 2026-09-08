@@ -1,14 +1,14 @@
 {
   "category": "General",
-  "changelog": "v0.5.1\n- Register Requests in Jellyfin 12's native desktop navigation\n- Preserve Modern mobile and Legacy navigation fallbacks\n- Keep unrelated custom menu links intact",
+  "changelog": "v0.5.2\n- Make the Requests close button clickable below Jellyfin 12's app bar\n- Close and dispose the Requests view on Jellyfin navigation or Escape\n- Ignore late async updates after the Requests view has closed\n- Credit Eric as the module developer",
   "description": "Searches the movie and TV sources enabled in MediaForge directly from Jellyfin. Users can request downloads; administrators can approve them or enable automatic mode.",
   "guid": "2ea7f67d-8e4d-4c84-bd5a-a5bcd713bb23",
   "name": "MediaForge Requests",
   "overview": "MediaForge search and download requests for all Jellyfin users",
-  "owner": "MediaForge Jellyfin Connector contributors",
+  "owner": "Eric",
   "targetAbi": "12.0.0.0",
   "timestamp": "2026-09-08T00:00:00Z",
-  "version": "0.5.1.0",
+  "version": "0.5.2.0",
   "status": "Active",
   "autoUpdate": true
 }

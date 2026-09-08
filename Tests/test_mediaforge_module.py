@@ -691,6 +691,7 @@ class ConnectorRegistrationTests(unittest.TestCase):
         app = FakeApp()
         module.register(app)
 
+        self.assertEqual("Eric", module.MODULE_AUTHOR)
         self.assertEqual("1.5.0", module.MODULE_MIN_APP_VERSION)
         self.assertEqual("1.6.999", module.MODULE_MAX_APP_VERSION)
         self.assertEqual(1, len(app.blueprints))

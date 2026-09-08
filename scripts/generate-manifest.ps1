@@ -54,7 +54,7 @@ $manifest = @(
         name = "MediaForge Requests"
         description = "Search MediaForge for movies and series directly in Jellyfin, submit requests, withdraw pending requests, and monitor download progress."
         overview = "MediaForge search and download requests for all Jellyfin users"
-        owner = "MediaForge Jellyfin Connector contributors"
+        owner = "Eric"
         category = "General"
         versions = $versions
     }

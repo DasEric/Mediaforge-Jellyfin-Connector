@@ -9,6 +9,8 @@ export default function (view, params) {
   let mineRendered = false;
   let mineVisible = true;
   let visibilityListenerAttached = false;
+  let discoverTimer = null;
+  let disposed = false;
   let searchGeneration = 0;
   let detailGeneration = 0;
 
@@ -57,26 +59,30 @@ export default function (view, params) {
   async function boot() {
     try {
       state.status = await call('Status');
+      if (disposed || !view.isConnected) return;
       q('mode').textContent = state.status.mode === 'automatic' ? 'Direkter Download' : 'Freigabe durch Admin';
       if (!state.status.configured) notice('Das Plugin ist noch nicht mit MediaForge verbunden.', true);
       else if (state.status.maintenance) notice(state.status.maintenanceMessage || 'Anfragen sind derzeit deaktiviert.', true);
       const data = await call('Sources');
+      if (disposed || !view.isConnected) return;
       state.sources = Array.isArray(data.sources) ? data.sources : [];
       state.sources.forEach((item) => {
         const option = document.createElement('option'); option.value = item.id; option.textContent = item.label; q('source').appendChild(option);
       });
       await loadDiscover();
       await detectAdmin();
-    } catch (error) { notice(error.message, true); }
+    } catch (error) { if (!disposed && view.isConnected) notice(error.message, true); }
   }
   async function loadDiscover(retry) {
+    if (disposed || !view.isConnected) return;
     const host = q('discover');
     try {
       const data = await call('Discover');
+      if (disposed || !view.isConnected) return;
       const definitions = [['new', 'Neu'], ['popular', 'Beliebt'], ['movies', 'Filme']];
       const total = definitions.reduce((count, row) => count + ((data.rows && data.rows[row[0]]) || []).length, 0);
       if (!total && !retry) {
-        setTimeout(() => loadDiscover(true), 2500);
+        discoverTimer = setTimeout(() => { discoverTimer = null; loadDiscover(true); }, 2500);
         return;
       }
       host.innerHTML = '';
@@ -91,13 +97,16 @@ export default function (view, params) {
       });
       if (!host.children.length) host.innerHTML = '<div class="mf-empty">Zurzeit sind keine Empfehlungen verfügbar.</div>';
     } catch (error) {
+      if (disposed || !view.isConnected) return;
       host.innerHTML = '';
       const box = document.createElement('div'); box.className = 'mf-notice mf-error'; box.textContent = 'Startansicht: ' + error.message; host.appendChild(box);
     }
   }
   async function detectAdmin() {
+    if (disposed || !view.isConnected) return;
     try {
       const items = await call('Admin/Requests');
+      if (disposed || !view.isConnected) return;
       const tab = view.querySelector('[data-tab="admin"]'); tab.style.display = '';
       renderRequests(q('admin'), items, true);
     } catch (_) { /* normal users receive 403 */ }
@@ -132,11 +141,11 @@ export default function (view, params) {
       } catch (error) {
         groups = [{ source: item.id, label: item.label, error: error.message }];
       }
-      if (generation !== searchGeneration) return;
+      if (disposed || generation !== searchGeneration || !view.isConnected) return;
       const rendered = appendResults(host, groups, pending);
       resultCount += rendered.count; errorCount += rendered.errors;
     }));
-    if (generation !== searchGeneration) return;
+    if (disposed || generation !== searchGeneration || !view.isConnected) return;
     pending.remove();
     if (!resultCount && !errorCount) host.innerHTML = '<div class="mf-empty">Keine Treffer gefunden.</div>';
   });
@@ -163,8 +172,11 @@ export default function (view, params) {
       const cover = document.createElement('img'); cover.className = 'mf-cover'; cover.loading = 'lazy'; cover.alt = '';
       card.appendChild(cover);
       call('Series', { query: { url: rawUrl } })
-        .then((detail) => detail.poster_url ? loadCover(cover, detail.poster_url) : cover.remove())
-        .catch(() => cover.remove());
+        .then((detail) => {
+          if (disposed || !cover.isConnected) return;
+          if (detail.poster_url) loadCover(cover, detail.poster_url); else cover.remove();
+        })
+        .catch(() => { if (!disposed && cover.isConnected) cover.remove(); });
     }
     const body = document.createElement('div'); body.className = 'mf-cardbody';
     const title = document.createElement('div'); title.className = 'mf-cardtitle'; title.textContent = item.title || item.name || 'Unbekannter Titel';
@@ -181,6 +193,7 @@ export default function (view, params) {
       if (!response || typeof response.blob !== 'function') throw new Error('Ungültige Bildantwort');
       const blob = await response.blob();
       if (!blob.type.startsWith('image/')) throw new Error('Ungültiger Bildtyp');
+      if (disposed || !image.isConnected) return;
       objectUrl = URL.createObjectURL(blob); image.src = objectUrl;
       image.addEventListener('load', () => URL.revokeObjectURL(objectUrl), { once: true });
       image.addEventListener('error', () => { URL.revokeObjectURL(objectUrl); image.remove(); }, { once: true });
@@ -207,7 +220,7 @@ export default function (view, params) {
       }
       const payload = { title: item.title || item.name || 'Unbekannter Titel', seriesUrl: rawUrl, source, mediaType: type };
       const plan = await call('Requests/Plan', { method: 'POST', body: payload });
-      if (generation !== detailGeneration) return;
+      if (disposed || generation !== detailGeneration || !view.isConnected) return;
       state.detail = Object.assign(payload, { title: plan.title || payload.title, plan });
       q('detail-title').textContent = state.detail.title;
       q('description').textContent = plan.description || 'Keine Beschreibung verfügbar.';
@@ -231,7 +244,7 @@ export default function (view, params) {
           : 'Alle ' + plan.total_count + ' Episoden sind bereits vorhanden. Es wird nichts eingereiht.';
       }
       q('plan').appendChild(summary);
-    } catch (error) { if (generation === detailGeneration) { q('description').textContent = error.message; q('plan').innerHTML = ''; } }
+    } catch (error) { if (!disposed && generation === detailGeneration && view.isConnected) { q('description').textContent = error.message; q('plan').innerHTML = ''; } }
   }
   function setOptions(select, values, preferred) { const clean = Array.from(new Set(values.filter(Boolean))); select.innerHTML = ''; clean.forEach((value) => { const option = document.createElement('option'); option.value = value; option.textContent = value; select.appendChild(option); }); if (clean.includes(preferred)) select.value = preferred; }
   q('request').addEventListener('click', async () => {
@@ -242,9 +255,10 @@ export default function (view, params) {
     try {
       const payload = { title: detail.title, seriesUrl: detail.seriesUrl, source: detail.source, mediaType: detail.plan.is_movie ? 'movie' : 'series', language: q('language').value, provider: q('provider').value, upscale: q('upscale').checked };
       const result = await call('Requests/Automatic', { method: 'POST', body: payload });
+      if (disposed || generation !== detailGeneration || !view.isConnected) return;
       const message = result.status === 'queued' ? 'Nur die fehlenden Inhalte wurden direkt an MediaForge übergeben.' : 'Die Anfrage für die fehlenden Inhalte wurde an den Administrator gesendet.';
-      if (generation === detailGeneration) { closeDetail(); notice(message); switchTab('mine'); } else { notice(message); }
-    } catch (error) { notice(error.message, true); } finally { if (generation === detailGeneration) q('request').disabled = false; }
+      closeDetail(); notice(message); switchTab('mine');
+    } catch (error) { if (!disposed && generation === detailGeneration && view.isConnected) notice(error.message, true); } finally { if (!disposed && generation === detailGeneration && view.isConnected) q('request').disabled = false; }
   });
   function closeDetail() { detailGeneration++; state.detail = null; q('overlay').style.display = 'none'; }
   q('close').addEventListener('click', closeDetail); q('cancel').addEventListener('click', closeDetail); q('overlay').addEventListener('click', (e) => { if (e.target === q('overlay')) closeDetail(); });
@@ -255,14 +269,16 @@ export default function (view, params) {
   }
   function scheduleMineRefresh(hasActiveDownload) {
     stopMinePolling();
-    if (!hasActiveDownload || !view.isConnected || !mineVisible || state.tab !== 'mine' || document.visibilityState === 'hidden') return;
+    if (disposed || !hasActiveDownload || !view.isConnected || !mineVisible || state.tab !== 'mine' || document.visibilityState === 'hidden') return;
     mineTimer = setTimeout(() => loadMine({ initial: false }), 5000);
   }
   function onVisibilityChange() {
+    if (disposed) return;
     if (document.visibilityState === 'hidden') stopMinePolling();
     else if (state.tab === 'mine' && mineVisible) loadMine({ initial: !mineRendered });
   }
   function setVisibilityListener(enabled) {
+    if (disposed) enabled = false;
     if (enabled && !visibilityListenerAttached) {
       document.addEventListener('visibilitychange', onVisibilityChange);
       visibilityListenerAttached = true;
@@ -272,7 +288,7 @@ export default function (view, params) {
     }
   }
   async function loadMine(options) {
-    if (mineLoading || !view.isConnected || !mineVisible) return;
+    if (disposed || mineLoading || !view.isConnected || !mineVisible) return;
     mineLoading = true;
     const initial = Boolean(options && options.initial) || !mineRendered;
     if (initial) q('mine').innerHTML = '<div class="mf-empty">Laden…</div>';
@@ -282,6 +298,7 @@ export default function (view, params) {
       if (items.some((item) => item.status === 'queued' && item.mediaForgeQueueId)) {
         try { progress = (await call('Requests/Progress')).items || []; } catch (_) { /* request list remains available */ }
       }
+      if (disposed || !view.isConnected || !mineVisible) return;
       const byQueue = new Map(progress.map((item) => [item.queue_id, item]));
       renderRequests(q('mine'), items, false, byQueue);
       mineRendered = true;
@@ -289,12 +306,22 @@ export default function (view, params) {
         || progress.some((item) => item.status === 'queued' || item.status === 'running');
       scheduleMineRefresh(hasActiveDownload);
     } catch (error) {
+      if (disposed || !view.isConnected) return;
       if (!mineRendered) q('mine').textContent = error.message;
       else notice('Meine Anfragen konnten nicht aktualisiert werden: ' + error.message, true);
       scheduleMineRefresh(true);
     } finally { mineLoading = false; }
   }
-  async function loadAdmin() { q('admin').innerHTML = '<div class="mf-empty">Laden…</div>'; try { renderRequests(q('admin'), await call('Admin/Requests'), true); } catch (error) { q('admin').textContent = error.message; } }
+  async function loadAdmin() {
+    if (disposed || !view.isConnected) return;
+    q('admin').innerHTML = '<div class="mf-empty">Laden…</div>';
+    try {
+      const items = await call('Admin/Requests');
+      if (!disposed && view.isConnected) renderRequests(q('admin'), items, true);
+    } catch (error) {
+      if (!disposed && view.isConnected) q('admin').textContent = error.message;
+    }
+  }
   function renderRequests(host, items, admin, progressByQueue) {
     const values = Array.isArray(items) ? items : [];
     if (!values.length) {
@@ -361,14 +388,25 @@ export default function (view, params) {
     }
     actions.hidden = !actions.children.length;
   }
-  async function decide(id, action) { try { await call('Admin/Requests/' + id + '/' + action, { method: 'POST', body: action === 'Reject' ? { reason: 'Vom Administrator abgelehnt.' } : {} }); await loadAdmin(); } catch (error) { notice(error.message, true); } }
-  async function withdrawRequest(id) { if (!window.confirm('Diese noch nicht freigegebene Anfrage zurückziehen?')) return; try { await call('Requests/' + id, { method: 'DELETE' }); await loadMine(); } catch (error) { notice(error.message, true); } }
+  async function decide(id, action) { try { await call('Admin/Requests/' + id + '/' + action, { method: 'POST', body: action === 'Reject' ? { reason: 'Vom Administrator abgelehnt.' } : {} }); await loadAdmin(); } catch (error) { if (!disposed && view.isConnected) notice(error.message, true); } }
+  async function withdrawRequest(id) { if (!window.confirm('Diese noch nicht freigegebene Anfrage zurückziehen?')) return; try { await call('Requests/' + id, { method: 'DELETE' }); await loadMine(); } catch (error) { if (!disposed && view.isConnected) notice(error.message, true); } }
   function progressLabel(progress) { if (!progress) return ''; return ({ queued: 'Wartet auf Download', running: 'Wird heruntergeladen', completed: 'Download fertig', partial: 'Teilweise fertig', failed: 'Download fehlgeschlagen', cancelled: 'In MediaForge abgebrochen' })[progress.status] || ''; }
   function progressDetail(progress) { const phase = ({ download: 'Download', ffmpeg: 'Verarbeitung' })[progress.phase] || 'Download'; const episodes = progress.total_episodes > 1 ? ' · ' + progress.current_episode + '/' + progress.total_episodes + ' Episoden' : ''; return phase + ': ' + Math.round(Number(progress.percent) || 0) + '%' + episodes; }
   function statusLabel(status) { return ({ pending: 'Ausstehend', processing: 'Wird übergeben', queued: 'In MediaForge', completed: 'Download fertig', available: 'Bereits in Jellyfin vorhanden', partial: 'Teilweise fertig', cancelled: 'Außerhalb von Jellyfin abgebrochen', rejected: 'Abgelehnt', withdrawn: 'Zurückgezogen', failed: 'Fehlgeschlagen' })[status] || status; }
   q('refresh-mine').addEventListener('click', () => loadMine({ initial: !mineRendered })); q('refresh-admin').addEventListener('click', loadAdmin);
   setVisibilityListener(true);
-  view.addEventListener('viewshow', () => { mineVisible = true; setVisibilityListener(true); if (state.tab === 'mine') loadMine({ initial: !mineRendered }); });
+  view.addEventListener('viewshow', () => { if (disposed) return; mineVisible = true; setVisibilityListener(true); if (state.tab === 'mine') loadMine({ initial: !mineRendered }); });
   view.addEventListener('viewhide', () => { mineVisible = false; stopMinePolling(); setVisibilityListener(false); detailGeneration++; });
   boot();
+  return function dispose() {
+    if (disposed) return;
+    disposed = true;
+    mineVisible = false;
+    stopMinePolling();
+    setVisibilityListener(false);
+    if (discoverTimer) clearTimeout(discoverTimer);
+    discoverTimer = null;
+    searchGeneration++;
+    detailGeneration++;
+  };
 }

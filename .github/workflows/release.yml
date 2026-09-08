@@ -63,7 +63,7 @@ jobs:
           node --check Jellyfin.Plugin.MediaForge/Web/injection.js
           node --check Jellyfin.Plugin.MediaForge/Web/requests.js
           node --check Jellyfin.Plugin.MediaForge/Web/config.js
-          node --test Tests/requests-ui.test.mjs
+          node --test Tests/injection-lifecycle.test.mjs Tests/requests-ui.test.mjs
 
       - name: Build release archives
         shell: pwsh
