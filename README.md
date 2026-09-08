@@ -57,10 +57,10 @@ use the same request application service and atomic request store.
 
 ## Requirements
 
-- Jellyfin 10.11 or later
+- Jellyfin 12.0 or later (use a 0.4.x release for Jellyfin 10.11)
 - MediaForge 1.5.x or 1.6.x
 - MediaForge must be reachable from the Jellyfin server over HTTP(S)
-- .NET 9 SDK for local builds
+- .NET 10 SDK for local builds
 
 MediaForge downloads the files. Its download directories must also be
 accessible to Jellyfin as media libraries. When using Docker, mount the same
@@ -139,9 +139,10 @@ already open Jellyfin Web clients after changing this setting. If the Jellyfin
 Otherwise, this plugin modifies Jellyfin's `index.html` as a fallback. Another
 server restart may therefore be required after a Jellyfin Web update.
 
-The **Requests** item is added to the custom section of the hamburger menu and
-is therefore available to all signed-in users. An observer adds it again if
-Jellyfin renders a new navigation drawer during navigation.
+The **Requests** item is added to both Jellyfin 12's Modern drawer and the
+Legacy hamburger menu and is therefore available to all signed-in users. An
+observer adds it again if Jellyfin renders a new navigation drawer during
+navigation.
 
 ## Custom Jellyfin repository and automatic updates
 

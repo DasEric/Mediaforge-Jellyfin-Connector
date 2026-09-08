@@ -34,6 +34,20 @@ if (-not (Test-Path -LiteralPath $archivePath -PathType Leaf)) {
 
 $checksum = (Get-FileHash -LiteralPath $archivePath -Algorithm MD5).Hash.ToUpperInvariant()
 $sourceUrl = "https://github.com/$RepositorySlug/releases/download/$ReleaseTag/$archiveName"
+$currentVersion = [ordered]@{
+    version = $versionFourPart
+    changelog = "Jellyfin 12 and .NET 10 compatibility, stable mobile request refreshes, and Modern layout navigation."
+    targetAbi = $targetAbi
+    sourceUrl = $sourceUrl
+    checksum = $checksum
+    timestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+}
+$versions = @($currentVersion)
+$historyPath = Join-Path $projectRoot "manifest-history.json"
+if (Test-Path -LiteralPath $historyPath -PathType Leaf) {
+    $history = @(Get-Content -LiteralPath $historyPath -Raw -Encoding UTF8 | ConvertFrom-Json)
+    $versions += @($history | Where-Object { [string]$_.version -ne $versionFourPart })
+}
 $manifest = @(
     [ordered]@{
         guid = "2ea7f67d-8e4d-4c84-bd5a-a5bcd713bb23"
@@ -42,16 +56,7 @@ $manifest = @(
         overview = "MediaForge search and download requests for all Jellyfin users"
         owner = "MediaForge Jellyfin Connector contributors"
         category = "General"
-        versions = @(
-            [ordered]@{
-                version = $versionFourPart
-                changelog = "Jellyfin library availability checks, restored posters, official MediaForge scope registration, disabled-source enforcement, and additional security hardening."
-                targetAbi = $targetAbi
-                sourceUrl = $sourceUrl
-                checksum = $checksum
-                timestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-            }
-        )
+        versions = $versions
     }
 )
 

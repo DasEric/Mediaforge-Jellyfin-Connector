@@ -1,0 +1,10 @@
+[
+  {
+    "version": "0.4.3.0",
+    "changelog": "Jellyfin library availability checks, restored posters, official MediaForge scope registration, disabled-source enforcement, and additional security hardening.",
+    "targetAbi": "10.11.0.0",
+    "sourceUrl": "https://github.com/DasEric/Mediaforge-Jellyfin-Connector/releases/download/v0.4.3/MediaForgeRequests_0.4.3.zip",
+    "checksum": "ABF4969644AB7DA9ABF9103FE4D57A18",
+    "timestamp": "2026-08-17T11:48:15Z"
+  }
+]

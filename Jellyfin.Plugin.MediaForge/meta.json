@@ -1,14 +1,14 @@
 {
   "category": "General",
-  "changelog": "v0.4.0\n- Add the versioned in-process Jellix bridge for search, submission, status and progress\n- Share request planning, source policy, limits, duplicate checks and persistence between HTTP and Jellix\n- Add user-bound, short-lived one-time selection tokens without exposing MediaForge URLs\n- Add bridge contract, isolation, concurrency and security regression tests",
+  "changelog": "v0.5.0\n- Add Jellyfin 12 and .NET 10 compatibility\n- Keep mobile scroll position stable during request progress updates\n- Add Modern layout navigation compatibility",
   "description": "Searches the movie and TV sources enabled in MediaForge directly from Jellyfin. Users can request downloads; administrators can approve them or enable automatic mode.",
   "guid": "2ea7f67d-8e4d-4c84-bd5a-a5bcd713bb23",
   "name": "MediaForge Requests",
   "overview": "MediaForge search and download requests for all Jellyfin users",
   "owner": "MediaForge Jellyfin Connector contributors",
-  "targetAbi": "10.11.0.0",
-  "timestamp": "2026-08-16T00:00:00Z",
-  "version": "0.4.3.0",
+  "targetAbi": "12.0.0.0",
+  "timestamp": "2026-09-08T00:00:00Z",
+  "version": "0.5.0.0",
   "status": "Active",
   "autoUpdate": true
 }

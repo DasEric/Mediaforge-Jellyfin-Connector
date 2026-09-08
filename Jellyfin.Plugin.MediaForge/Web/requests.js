@@ -6,6 +6,9 @@ export default function (view, params) {
   const state = { status: {}, sources: [], detail: null, source: '', tab: 'search' };
   let mineTimer = null;
   let mineLoading = false;
+  let mineRendered = false;
+  let mineVisible = true;
+  let visibilityListenerAttached = false;
   let searchGeneration = 0;
   let detailGeneration = 0;
 
@@ -43,10 +46,10 @@ export default function (view, params) {
   }
   function switchTab(name) {
     state.tab = name;
-    if (name !== 'mine' && mineTimer) { clearTimeout(mineTimer); mineTimer = null; }
+    if (name !== 'mine') stopMinePolling();
     view.querySelectorAll('.mf-tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
     view.querySelectorAll('.mf-panel').forEach((p) => p.classList.toggle('active', p.dataset.panel === name));
-    if (name === 'mine') loadMine();
+    if (name === 'mine') loadMine({ initial: !mineRendered });
     if (name === 'admin') loadAdmin();
   }
   view.querySelectorAll('.mf-tab').forEach((b) => b.addEventListener('click', () => switchTab(b.dataset.tab)));
@@ -246,10 +249,33 @@ export default function (view, params) {
   function closeDetail() { detailGeneration++; state.detail = null; q('overlay').style.display = 'none'; }
   q('close').addEventListener('click', closeDetail); q('cancel').addEventListener('click', closeDetail); q('overlay').addEventListener('click', (e) => { if (e.target === q('overlay')) closeDetail(); });
 
-  async function loadMine() {
-    if (mineLoading) return;
+  function stopMinePolling() {
+    if (mineTimer) clearTimeout(mineTimer);
+    mineTimer = null;
+  }
+  function scheduleMineRefresh(hasActiveDownload) {
+    stopMinePolling();
+    if (!hasActiveDownload || !view.isConnected || !mineVisible || state.tab !== 'mine' || document.visibilityState === 'hidden') return;
+    mineTimer = setTimeout(() => loadMine({ initial: false }), 5000);
+  }
+  function onVisibilityChange() {
+    if (document.visibilityState === 'hidden') stopMinePolling();
+    else if (state.tab === 'mine' && mineVisible) loadMine({ initial: !mineRendered });
+  }
+  function setVisibilityListener(enabled) {
+    if (enabled && !visibilityListenerAttached) {
+      document.addEventListener('visibilitychange', onVisibilityChange);
+      visibilityListenerAttached = true;
+    } else if (!enabled && visibilityListenerAttached) {
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      visibilityListenerAttached = false;
+    }
+  }
+  async function loadMine(options) {
+    if (mineLoading || !view.isConnected || !mineVisible) return;
     mineLoading = true;
-    q('mine').innerHTML = '<div class="mf-empty">Laden…</div>';
+    const initial = Boolean(options && options.initial) || !mineRendered;
+    if (initial) q('mine').innerHTML = '<div class="mf-empty">Laden…</div>';
     try {
       const items = await call('Requests/Mine');
       let progress = [];
@@ -258,39 +284,91 @@ export default function (view, params) {
       }
       const byQueue = new Map(progress.map((item) => [item.queue_id, item]));
       renderRequests(q('mine'), items, false, byQueue);
-      if (mineTimer) clearTimeout(mineTimer);
+      mineRendered = true;
       const hasActiveDownload = items.some((item) => item.status === 'queued')
         || progress.some((item) => item.status === 'queued' || item.status === 'running');
-      if (view.isConnected && state.tab === 'mine' && hasActiveDownload) {
-        mineTimer = setTimeout(loadMine, 5000);
-      }
-    } catch (error) { q('mine').textContent = error.message; }
-    finally { mineLoading = false; }
+      scheduleMineRefresh(hasActiveDownload);
+    } catch (error) {
+      if (!mineRendered) q('mine').textContent = error.message;
+      else notice('Meine Anfragen konnten nicht aktualisiert werden: ' + error.message, true);
+      scheduleMineRefresh(true);
+    } finally { mineLoading = false; }
   }
   async function loadAdmin() { q('admin').innerHTML = '<div class="mf-empty">Laden…</div>'; try { renderRequests(q('admin'), await call('Admin/Requests'), true); } catch (error) { q('admin').textContent = error.message; } }
   function renderRequests(host, items, admin, progressByQueue) {
-    host.innerHTML = ''; if (!items || !items.length) { host.innerHTML = '<div class="mf-empty">Keine Anfragen vorhanden.</div>'; return; }
-    items.forEach((item) => {
-      const card = document.createElement('article'); card.className = 'mf-request'; const top = document.createElement('div'); top.className = 'mf-requesttop';
-      const left = document.createElement('div'); const title = document.createElement('div'); title.className = 'mf-requesttitle'; title.textContent = item.title; const meta = document.createElement('div'); meta.className = 'mf-meta'; meta.textContent = (admin ? item.username + ' · ' : '') + (item.selectionLabel || ((item.episodes || []).length + ' Episoden')) + ' · ' + item.language + ' · ' + new Date(item.createdUtc).toLocaleString(); left.append(title, meta);
-      const progress = progressByQueue && progressByQueue.get(item.mediaForgeQueueId); const pill = document.createElement('span'); pill.className = 'mf-pill ' + item.status; pill.textContent = progressLabel(progress) || statusLabel(item.status); top.append(left, pill); card.appendChild(top);
-      if (progress) {
-        const box = document.createElement('div'); box.className = 'mf-requestprogress';
-        const track = document.createElement('div'); track.className = 'mf-requestprogresstrack';
-        const fill = document.createElement('div'); fill.className = 'mf-requestprogressfill'; fill.style.width = Math.max(0, Math.min(100, Number(progress.percent) || 0)) + '%'; track.appendChild(fill);
-        const detail = document.createElement('div'); detail.className = 'mf-meta'; detail.textContent = progressDetail(progress); box.append(track, detail); card.appendChild(box);
-      }
-      if (item.error) { const err = document.createElement('div'); err.className = 'mf-notice mf-error'; err.textContent = item.error; card.appendChild(err); }
-      if (admin && (item.status === 'pending' || item.status === 'failed')) { const actions = document.createElement('div'); actions.className = 'mf-actions'; const approve = document.createElement('button'); approve.className = 'mf-btn'; approve.textContent = item.status === 'failed' ? 'Erneut versuchen' : 'Freigeben'; approve.onclick = () => decide(item.id, 'Approve'); const reject = document.createElement('button'); reject.className = 'mf-btn danger'; reject.textContent = 'Ablehnen'; reject.onclick = () => decide(item.id, 'Reject'); actions.append(approve, reject); card.appendChild(actions); }
-      if (!admin && item.status === 'pending') { const actions = document.createElement('div'); actions.className = 'mf-actions'; const withdraw = document.createElement('button'); withdraw.className = 'mf-btn danger'; withdraw.textContent = 'Anfrage zurückziehen'; withdraw.onclick = () => withdrawRequest(item.id); actions.appendChild(withdraw); card.appendChild(actions); }
-      host.appendChild(card);
+    const values = Array.isArray(items) ? items : [];
+    if (!values.length) {
+      if (host.children.length !== 1 || !host.firstElementChild.classList.contains('mf-empty')) host.innerHTML = '<div class="mf-empty">Keine Anfragen vorhanden.</div>';
+      return;
+    }
+
+    const firstVisible = Array.from(host.querySelectorAll('.mf-request')).find((card) => card.getBoundingClientRect().bottom >= 0);
+    const anchorId = firstVisible && firstVisible.dataset.requestId;
+    const anchorTop = firstVisible ? firstVisible.getBoundingClientRect().top : null;
+    const existing = new Map(Array.from(host.querySelectorAll('.mf-request')).map((card) => [card.dataset.requestId, card]));
+    host.querySelectorAll('.mf-empty').forEach((node) => node.remove());
+    values.forEach((item, index) => {
+      const key = String(item.id);
+      const card = existing.get(key) || createRequestCard(key);
+      existing.delete(key);
+      updateRequestCard(card, item, admin, progressByQueue && progressByQueue.get(item.mediaForgeQueueId));
+      const atIndex = host.children[index];
+      if (atIndex !== card) host.insertBefore(card, atIndex || null);
     });
+    existing.forEach((card) => card.remove());
+
+    if (anchorId && anchorTop !== null && typeof window.scrollBy === 'function') {
+      const anchor = Array.from(host.querySelectorAll('.mf-request')).find((card) => card.dataset.requestId === anchorId);
+      if (anchor) {
+        const delta = anchor.getBoundingClientRect().top - anchorTop;
+        if (Math.abs(delta) > 0.5) window.scrollBy(0, delta);
+      }
+    }
+  }
+  function createRequestCard(key) {
+    const card = document.createElement('article'); card.className = 'mf-request'; card.dataset.requestId = key;
+    const top = document.createElement('div'); top.className = 'mf-requesttop';
+    const left = document.createElement('div');
+    const title = document.createElement('div'); title.className = 'mf-requesttitle'; title.dataset.role = 'title';
+    const meta = document.createElement('div'); meta.className = 'mf-meta'; meta.dataset.role = 'meta';
+    const pill = document.createElement('span'); pill.dataset.role = 'pill';
+    left.append(title, meta); top.append(left, pill);
+    const progressBox = document.createElement('div'); progressBox.className = 'mf-requestprogress'; progressBox.dataset.role = 'progress';
+    const track = document.createElement('div'); track.className = 'mf-requestprogresstrack';
+    const fill = document.createElement('div'); fill.className = 'mf-requestprogressfill'; fill.dataset.role = 'progress-fill'; track.appendChild(fill);
+    const detail = document.createElement('div'); detail.className = 'mf-meta'; detail.dataset.role = 'progress-detail'; progressBox.append(track, detail);
+    const error = document.createElement('div'); error.className = 'mf-notice mf-error'; error.dataset.role = 'error';
+    const actions = document.createElement('div'); actions.className = 'mf-actions'; actions.dataset.role = 'actions';
+    card.append(top, progressBox, error, actions);
+    return card;
+  }
+  function updateRequestCard(card, item, admin, progress) {
+    card.querySelector('[data-role="title"]').textContent = item.title;
+    card.querySelector('[data-role="meta"]').textContent = (admin ? item.username + ' · ' : '') + (item.selectionLabel || ((item.episodes || []).length + ' Episoden')) + ' · ' + item.language + ' · ' + new Date(item.createdUtc).toLocaleString();
+    const pill = card.querySelector('[data-role="pill"]'); pill.className = 'mf-pill ' + item.status; pill.textContent = progressLabel(progress) || statusLabel(item.status);
+    const progressBox = card.querySelector('[data-role="progress"]'); progressBox.hidden = !progress;
+    if (progress) {
+      card.querySelector('[data-role="progress-fill"]').style.width = Math.max(0, Math.min(100, Number(progress.percent) || 0)) + '%';
+      card.querySelector('[data-role="progress-detail"]').textContent = progressDetail(progress);
+    }
+    const error = card.querySelector('[data-role="error"]'); error.hidden = !item.error; error.textContent = item.error || '';
+    const actions = card.querySelector('[data-role="actions"]'); actions.innerHTML = '';
+    if (admin && (item.status === 'pending' || item.status === 'failed')) {
+      const approve = document.createElement('button'); approve.className = 'mf-btn'; approve.textContent = item.status === 'failed' ? 'Erneut versuchen' : 'Freigeben'; approve.onclick = () => decide(item.id, 'Approve');
+      const reject = document.createElement('button'); reject.className = 'mf-btn danger'; reject.textContent = 'Ablehnen'; reject.onclick = () => decide(item.id, 'Reject'); actions.append(approve, reject);
+    } else if (!admin && item.status === 'pending') {
+      const withdraw = document.createElement('button'); withdraw.className = 'mf-btn danger'; withdraw.textContent = 'Anfrage zurückziehen'; withdraw.onclick = () => withdrawRequest(item.id); actions.appendChild(withdraw);
+    }
+    actions.hidden = !actions.children.length;
   }
   async function decide(id, action) { try { await call('Admin/Requests/' + id + '/' + action, { method: 'POST', body: action === 'Reject' ? { reason: 'Vom Administrator abgelehnt.' } : {} }); await loadAdmin(); } catch (error) { notice(error.message, true); } }
   async function withdrawRequest(id) { if (!window.confirm('Diese noch nicht freigegebene Anfrage zurückziehen?')) return; try { await call('Requests/' + id, { method: 'DELETE' }); await loadMine(); } catch (error) { notice(error.message, true); } }
   function progressLabel(progress) { if (!progress) return ''; return ({ queued: 'Wartet auf Download', running: 'Wird heruntergeladen', completed: 'Download fertig', partial: 'Teilweise fertig', failed: 'Download fehlgeschlagen', cancelled: 'In MediaForge abgebrochen' })[progress.status] || ''; }
   function progressDetail(progress) { const phase = ({ download: 'Download', ffmpeg: 'Verarbeitung' })[progress.phase] || 'Download'; const episodes = progress.total_episodes > 1 ? ' · ' + progress.current_episode + '/' + progress.total_episodes + ' Episoden' : ''; return phase + ': ' + Math.round(Number(progress.percent) || 0) + '%' + episodes; }
   function statusLabel(status) { return ({ pending: 'Ausstehend', processing: 'Wird übergeben', queued: 'In MediaForge', completed: 'Download fertig', available: 'Bereits in Jellyfin vorhanden', partial: 'Teilweise fertig', cancelled: 'Außerhalb von Jellyfin abgebrochen', rejected: 'Abgelehnt', withdrawn: 'Zurückgezogen', failed: 'Fehlgeschlagen' })[status] || status; }
-  q('refresh-mine').addEventListener('click', loadMine); q('refresh-admin').addEventListener('click', loadAdmin);
+  q('refresh-mine').addEventListener('click', () => loadMine({ initial: !mineRendered })); q('refresh-admin').addEventListener('click', loadAdmin);
+  setVisibilityListener(true);
+  view.addEventListener('viewshow', () => { mineVisible = true; setVisibilityListener(true); if (state.tab === 'mine') loadMine({ initial: !mineRendered }); });
+  view.addEventListener('viewhide', () => { mineVisible = false; stopMinePolling(); setVisibilityListener(false); detailGeneration++; });
   boot();
 }

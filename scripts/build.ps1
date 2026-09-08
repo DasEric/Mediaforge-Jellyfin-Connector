@@ -12,7 +12,7 @@ if ($releaseVersion -notmatch '^\d+\.\d+\.\d+$') {
     throw "version.json contains an invalid semantic version"
 }
 $project = Join-Path $projectRoot "Jellyfin.Plugin.MediaForge\Jellyfin.Plugin.MediaForge.csproj"
-$output = Join-Path $projectRoot "Jellyfin.Plugin.MediaForge\bin\$Configuration\net9.0"
+$output = Join-Path $projectRoot "Jellyfin.Plugin.MediaForge\bin\$Configuration\net10.0"
 $dist = Join-Path $projectRoot "dist"
 
 function Get-ContainedPath([string]$Parent, [string]$Child) {

@@ -76,6 +76,15 @@ static void TestWebInjection()
 
     var disabled = TransformationPatches.ApplyIndexHtml(new PatchRequestPayload { Contents = enabled }, enabled: false);
     Assert(!disabled.Contains("MediaForgeRequests/InjectionScript", StringComparison.Ordinal), "Disabled user navigation script was not removed.");
+
+    var assembly = typeof(Plugin).Assembly;
+    using var stream = assembly.GetManifestResourceStream("Jellyfin.Plugin.MediaForge.Web.injection.js")
+        ?? throw new InvalidOperationException("Embedded navigation injection is missing.");
+    using var reader = new StreamReader(stream, Encoding.UTF8);
+    var script = reader.ReadToEnd();
+    Assert(script.Contains("document.createElement('li')", StringComparison.Ordinal), "The Modern drawer entry is not a semantic MUI list item.");
+    Assert(script.Contains("item.appendChild(modern)", StringComparison.Ordinal), "The Modern drawer link is not wrapped in its list item.");
+    Assert(script.Contains("if (!modernDrawer)", StringComparison.Ordinal), "The Modern mobile drawer cannot receive its close event.");
 }
 
 static void TestPluginPageRegistration()
