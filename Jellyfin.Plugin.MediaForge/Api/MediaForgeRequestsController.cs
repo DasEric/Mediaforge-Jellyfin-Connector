@@ -433,7 +433,23 @@ public sealed class MediaForgeRequestsController : ControllerBase
     {
         try
         {
-            return Ok(await _mediaForge.GetHealthAsync(cancellationToken).ConfigureAwait(false));
+            var health = await _mediaForge.GetHealthAsync(cancellationToken).ConfigureAwait(false);
+            var missingScopes = MediaForgeClient.ReadMissingConnectorScopes(health);
+            if (missingScopes is null)
+            {
+                return StatusCode(
+                    StatusCodes.Status502BadGateway,
+                    new { error = "Das MediaForge-Connector-Modul ist veraltet. Bitte Modul und Jellyfin-Plugin gemeinsam aktualisieren." });
+            }
+
+            if (missingScopes.Count > 0)
+            {
+                return StatusCode(
+                    StatusCodes.Status403Forbidden,
+                    new { error = "Dem MediaForge API-Key fehlen Berechtigungen: " + string.Join(", ", missingScopes) });
+            }
+
+            return Ok(health);
         }
         catch (MediaForgeException exception)
         {

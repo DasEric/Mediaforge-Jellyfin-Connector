@@ -10,7 +10,7 @@ import unittest
 from functools import wraps
 from pathlib import Path
 
-from flask import Flask, jsonify, request
+from flask import Flask, g, jsonify, request
 
 
 def _mediaforge_login_required(view):
@@ -23,7 +23,7 @@ def _mediaforge_login_required(view):
     return decorated
 
 
-def _load_routes_module(*, modern: bool = True):
+def _load_routes_module(*, modern: bool = True, with_path_helper: bool = False):
     package_names = (
         "mediaforge",
         "mediaforge.web",
@@ -67,6 +67,8 @@ def _load_routes_module(*, modern: bool = True):
             (request.get_json(silent=True) or {}).get("episodes", [])
         ),
     }
+    if with_path_helper:
+        database.default_custom_path_for_url = lambda _url: 77
     sys.modules[database.__name__] = database
 
     mirrors = types.ModuleType("mediaforge.mirrors")
@@ -87,7 +89,12 @@ def _load_routes_module(*, modern: bool = True):
     api = types.ModuleType("mediaforge.web.routes.v1_api")
 
     def check_api_key(scope):
-        if request.headers.get("X-Api-Key") != f"{scope}-key":
+        supplied = request.headers.get("X-Api-Key")
+        if supplied == "all-scopes-key":
+            g._v1_scopes = ["status:read", "library:read", "queue:read", "queue:write"]
+        elif supplied == f"{scope}-key":
+            g._v1_scopes = [scope]
+        else:
             return jsonify({"error": "unauthorized"}), 401
         return None
 
@@ -201,6 +208,7 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
         self.app = Flask(__name__)
         self.calls = []
         self.download_bodies = []
+        self.download_request_bodies = []
         for endpoint in routes._ROUTE_NAMES.values():
             self.app.add_url_rule(
                 f"/internal/{endpoint}",
@@ -250,7 +258,7 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
         self.client = self.app.test_client()
 
     def _internal(self, endpoint):
-        def handler():
+        def handler(payload=None):
             self.calls.append(endpoint)
             if endpoint == "api_search_sources":
                 return jsonify(
@@ -306,8 +314,24 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
                         ]
                     }
                 )
+            if endpoint == "api_providers":
+                return jsonify(
+                    {
+                        "providers": {
+                            "German Dub": ["Vidoza", "vidoza", "VOE", ""],
+                            "german dub": ["Must not replace the first entry"],
+                            "English Sub": ["Filemoon"],
+                            "Invalid": "not-a-list",
+                        }
+                    }
+                )
             if endpoint == "api_download":
-                self.download_bodies.append(dict(request.get_json(silent=True) or {}))
+                self.download_request_bodies.append(
+                    dict(request.get_json(silent=True) or {})
+                )
+                self.download_bodies.append(
+                    dict(payload if payload is not None else request.get_json(silent=True) or {})
+                )
                 return jsonify({"queue_id": 42})
             return jsonify({"ok": True})
 
@@ -327,10 +351,83 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         self.assertTrue(response.get_json()["ok"])
         self.assertEqual("0.3.0", response.get_json()["version"])
+        self.assertEqual(
+            {
+                "status:read": True,
+                "library:read": False,
+                "queue:read": False,
+                "queue:write": False,
+            },
+            response.get_json()["capabilities"],
+        )
+
+    def test_provider_envelope_is_normalized_for_jellyfin(self):
+        response = self.client.get(
+            "/api/v1/connector/providers?url=https://allowed.invalid/media/episode-1",
+            headers={"X-Api-Key": "library:read-key"},
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(
+            {
+                "German Dub": ["Vidoza", "VOE"],
+                "English Sub": ["Filemoon"],
+            },
+            response.get_json(),
+        )
 
     def test_mediaforge_15_uses_the_legacy_api_key_fallback(self):
         routes = _load_routes_module(modern=False)
         self.assertEqual("check_api_key", routes.check_api_key.__name__)
+
+    def test_mediaforge_16_default_path_helper_is_authoritative(self):
+        routes = _load_routes_module(with_path_helper=True)
+        self.assertEqual(
+            77,
+            routes._default_custom_path_id("https://allowed.invalid/media/series"),
+        )
+
+    def test_mediaforge_15_download_handler_receives_validated_cached_json(self):
+        routes = _load_routes_module(modern=False)
+        app = Flask("legacy-download")
+        observed = []
+
+        for endpoint in routes._ROUTE_NAMES.values():
+            if endpoint == "api_download":
+                def legacy_download():
+                    observed.append(dict(request.get_json(silent=True) or {}))
+                    return jsonify({"queue_id": 84})
+
+                view = legacy_download
+            elif endpoint == "api_search_sources":
+                view = lambda: jsonify({"sources": []})
+            else:
+                view = lambda: jsonify({})
+            app.add_url_rule(
+                f"/legacy/{endpoint}",
+                endpoint=endpoint,
+                view_func=view,
+                methods=["GET", "POST"],
+            )
+
+        blueprint, _scopes = routes.create_blueprint(app, "connector_enabled", "0.5.3")
+        app.register_blueprint(blueprint)
+        response = app.test_client().post(
+            "/api/v1/connector/download",
+            json={
+                "episodes": ["https://allowed.invalid/media/episode-1"],
+                "language": "German Dub",
+                "provider": "VOE",
+                "title": "Title",
+                "series_url": "https://allowed.invalid/media/series",
+                "upscale": False,
+            },
+            headers={"X-Api-Key": "queue:write-key"},
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(84, response.get_json()["queue_id"])
+        self.assertEqual(11, observed[0]["custom_path_id"])
 
     def test_discovery_does_not_require_a_mediaforge_web_session(self):
         response = self.client.get(
@@ -535,6 +632,7 @@ class ConnectorRouteSecurityTests(unittest.TestCase):
         self.assertEqual(42, response.get_json()["queue_id"])
         self.assertEqual(2, response.get_json()["accepted_episode_count"])
         self.assertEqual(11, self.download_bodies[0]["custom_path_id"])
+        self.assertNotIn("custom_path_id", self.download_request_bodies[0])
         self.assertNotIn("/private/series", response.get_data(as_text=True))
 
     def test_movie_and_series_defaults_follow_mediaforge_site_assignments(self):

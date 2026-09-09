@@ -9,6 +9,18 @@ export default function (view) {
     }
     return ApiClient.fetch(request);
   };
+  async function readErrorMessage(error) {
+    const response = error && error.response ? error.response : error;
+    const responseJson = error && error.responseJSON || response && response.responseJSON;
+    if (responseJson && typeof responseJson.error === 'string' && responseJson.error.trim()) return responseJson.error;
+    if (response && typeof response.clone === 'function') {
+      try {
+        const payload = await response.clone().json();
+        if (payload && typeof payload.error === 'string' && payload.error.trim()) return payload.error;
+      } catch (_) { /* the response was empty or not JSON */ }
+    }
+    return 'Verbindung fehlgeschlagen. Bitte URL, API-Key und installiertes MediaForge-Modul prüfen.';
+  }
   function showKeyStatus(hasKey) {
     const input = byId('mfApiKey');
     input.value = '';
@@ -88,8 +100,8 @@ export default function (view) {
       const result = await connector('Admin/Test', 'POST', {});
       target.textContent = result.ok ? 'Verbindung erfolgreich – Connector ' + (result.version || '') : 'Unerwartete Antwort von MediaForge.';
       target.style.color = '#52b54b';
-    } catch (_) {
-      target.textContent = 'Verbindung fehlgeschlagen. Bitte URL, API-Key, Scopes und installiertes MediaForge-Modul prüfen.';
+    } catch (error) {
+      target.textContent = await readErrorMessage(error);
       target.style.color = '#e35b64';
     }
   }

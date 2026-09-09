@@ -11,6 +11,13 @@ public sealed class MediaForgeClient
     private const int MaxResponseBytes = 16 * 1024 * 1024;
     private const int MaxImageBytes = 8 * 1024 * 1024;
     private static readonly TimeSpan SearchTimeout = TimeSpan.FromSeconds(15);
+    private static readonly string[] RequiredConnectorScopes =
+    [
+        "status:read",
+        "library:read",
+        "queue:read",
+        "queue:write",
+    ];
     private static readonly HashSet<string> AllowedImageTypes = new(StringComparer.OrdinalIgnoreCase)
     {
         "image/jpeg",
@@ -41,6 +48,21 @@ public sealed class MediaForgeClient
     public Task<JsonElement> GetHealthAsync(CancellationToken cancellationToken)
         => SendAsync(HttpMethod.Get, "api/v1/connector/health", null, cancellationToken);
 
+    internal static IReadOnlyList<string>? ReadMissingConnectorScopes(JsonElement response)
+    {
+        if (response.ValueKind != JsonValueKind.Object
+            || !response.TryGetProperty("capabilities", out var capabilities)
+            || capabilities.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        return RequiredConnectorScopes
+            .Where(scope => !capabilities.TryGetProperty(scope, out var value)
+                || value.ValueKind != JsonValueKind.True)
+            .ToArray();
+    }
+
     /// <summary>Returns a sanitized connector diagnostic without exposing secrets or upstream bodies.</summary>
     public async Task<MediaForgeConnectionStatus> CheckHealthAsync(CancellationToken cancellationToken)
     {
@@ -56,7 +78,9 @@ public sealed class MediaForgeClient
         try
         {
             var response = await GetHealthAsync(cancellationToken).ConfigureAwait(false);
-            var healthy = response.ValueKind == JsonValueKind.Object
+            var missingScopes = ReadMissingConnectorScopes(response);
+            var healthy = missingScopes is { Count: 0 }
+                && response.ValueKind == JsonValueKind.Object
                 && response.TryGetProperty("ok", out var ok)
                 && ok.ValueKind == JsonValueKind.True;
             return new MediaForgeConnectionStatus(healthy, true, true);

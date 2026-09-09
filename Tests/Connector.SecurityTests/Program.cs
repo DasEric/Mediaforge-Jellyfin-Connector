@@ -33,6 +33,7 @@ try
     TestJellyfinLibraryMatching();
     TestJellyfinLibraryQueries();
     await TestEpisodePlanningContractAsync();
+    TestProviderAndCapabilityContracts();
     TestServiceRegistrationAndImageTypes();
     TestQueueResponseContract();
     TestPluginPageRegistration();
@@ -158,10 +159,12 @@ static void TestRequestPageContract()
     Assert(script.Contains("source: item.id", StringComparison.Ordinal), "All-source searches are not issued independently per MediaForge source.");
     Assert(script.Contains("Weitere Quellen werden durchsucht", StringComparison.Ordinal), "Progressive search does not communicate outstanding sources.");
     Assert(script.Contains("detailGeneration", StringComparison.Ordinal), "Stale detail requests can overwrite the active dialog.");
-    Assert(script.Contains("if (!disposed && generation === detailGeneration && view.isConnected) q('request').disabled = false", StringComparison.Ordinal), "An older or disposed request can mutate the active dialog.");
+    Assert(script.Contains("if (!disposed && generation === detailGeneration && view.isConnected) q('request').disabled = !q('language').value || !q('provider').value", StringComparison.Ordinal), "An older, disposed or invalid request can mutate or re-enable the active dialog.");
     Assert(script.Contains("response.clone().json()", StringComparison.Ordinal), "Structured API errors are not shown to users.");
     Assert(script.Contains("available: 'Bereits in Jellyfin vorhanden'", StringComparison.Ordinal), "Approval-time availability is not represented in the UI.");
     Assert(script.Contains("items.some((item) => item.status === 'queued')", StringComparison.Ordinal), "A temporary progress error permanently stops polling queued downloads.");
+    Assert(script.Contains("setOptions(q('provider'), available, state.status.defaultProvider)", StringComparison.Ordinal), "The Requests page silently invents a default provider.");
+    Assert(script.Contains("keinen verfügbaren Download-Provider", StringComparison.Ordinal), "The Requests page does not explain unavailable download providers.");
     Assert(!script.Contains("accessToken()", StringComparison.Ordinal), "The Requests page must not embed the Jellyfin token in image URLs.");
     Assert(!script.Contains("api_key", StringComparison.OrdinalIgnoreCase), "The Requests page must not put API keys in URLs.");
 
@@ -686,6 +689,92 @@ static async Task TestEpisodePlanningContractAsync()
         "Two incomplete season responses did not fail closed before queueing.");
 }
 
+static void TestProviderAndCapabilityContracts()
+{
+    using var wrapped = JsonDocument.Parse(
+        """
+        {
+          "providers": {
+            "German Dub": ["VOE", "voe", "Doodstream"],
+            "English Sub": ["Streamtape"]
+          }
+        }
+        """);
+    var providers = MediaForgeRequestApplicationService.ReadProviderOptions(wrapped.RootElement);
+    Assert(providers.Count == 2, "The MediaForge 1.6 provider envelope was not unwrapped.");
+    Assert(providers["German Dub"].SequenceEqual(["VOE", "Doodstream"]), "Provider values were not normalized case-insensitively.");
+
+    using var legacy = JsonDocument.Parse("{\"German Dub\":[\"VOE\"]}");
+    Assert(
+        MediaForgeRequestApplicationService.ReadProviderOptions(legacy.RootElement)["German Dub"].Single() == "VOE",
+        "The rolling-update parser rejected the legacy flat provider response.");
+
+    var plan = new MissingMediaPlan(
+        "Title",
+        string.Empty,
+        false,
+        1,
+        ["https://example.invalid/episode/1"],
+        "1 fehlende Episode",
+        ["German Dub"],
+        providers);
+    var fallback = MediaForgeRequestApplicationService.ResolveDownloadOptions(plan, "Unavailable", "Unavailable", allowFallback: true);
+    Assert(fallback == ("German Dub", "VOE"), "Jellix did not fall back to the first real MediaForge option.");
+
+    var mismatchedPlan = plan with
+    {
+        Providers = new Dictionary<string, IReadOnlyList<string>>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["English Sub"] = ["Streamtape"],
+            ["German Dub"] = ["VOE"],
+        },
+    };
+    var commonLanguageFallback = MediaForgeRequestApplicationService.ResolveDownloadOptions(
+        mismatchedPlan,
+        "English Sub",
+        "Streamtape",
+        allowFallback: true);
+    Assert(
+        commonLanguageFallback == ("German Dub", "VOE"),
+        "A provider language unavailable across all missing episodes was accepted.");
+    Assert(
+        MediaForgeRequestApplicationService.FilterProviderOptions(providers, []).Count == 0,
+        "An empty common-language intersection kept providers from only one episode.");
+    Assert(
+        MediaForgeRequestApplicationService.FilterProviderOptions(providers, ["german dub"]).Keys.Single() == "German Dub",
+        "Common episode languages were matched case-sensitively.");
+    Assert(
+        ReferenceEquals(MediaForgeRequestApplicationService.FilterProviderOptions(providers, null), providers),
+        "Missing language metadata discarded otherwise valid provider options.");
+
+    var rejected = false;
+    try
+    {
+        _ = MediaForgeRequestApplicationService.ResolveDownloadOptions(plan, "German Dub", "Unavailable", allowFallback: false);
+    }
+    catch (MediaForgeApplicationException exception) when (exception.StatusCode == System.Net.HttpStatusCode.BadRequest)
+    {
+        rejected = true;
+    }
+
+    Assert(rejected, "A web request could submit a provider that MediaForge did not advertise.");
+
+    using var healthy = JsonDocument.Parse(
+        """
+        {"ok":true,"capabilities":{"status:read":true,"library:read":true,"queue:read":true,"queue:write":true}}
+        """);
+    Assert(MediaForgeClient.ReadMissingConnectorScopes(healthy.RootElement) is { Count: 0 }, "A fully scoped API key failed validation.");
+    using var insufficient = JsonDocument.Parse(
+        """
+        {"ok":true,"capabilities":{"status:read":true,"library:read":true,"queue:read":true,"queue:write":false}}
+        """);
+    Assert(
+        MediaForgeClient.ReadMissingConnectorScopes(insufficient.RootElement)?.SequenceEqual(["queue:write"]) == true,
+        "A missing queue:write scope was not diagnosed.");
+    using var outdated = JsonDocument.Parse("{\"ok\":true}");
+    Assert(MediaForgeClient.ReadMissingConnectorScopes(outdated.RootElement) is null, "An outdated module was treated as capability-aware.");
+}
+
 static void AssertJsonNames(Type type, IReadOnlyDictionary<string, string> expected)
 {
     foreach (var pair in expected)
@@ -974,6 +1063,106 @@ static async Task TestSharedApplicationRulesAsync(string testRoot)
     var unavailable = await environment.Client.CheckHealthAsync(CancellationToken.None);
     Assert(unavailable.Configured && !unavailable.Healthy && unavailable.ApiKeyValid, "A non-authentication health failure was misreported as an invalid key.");
     environment.Handler.HealthStatus = System.Net.HttpStatusCode.OK;
+
+    var fallbackConfig = new PluginConfiguration
+    {
+        MediaForgeUrl = "http://mediaforge.invalid:8080",
+        MaxPendingRequestsPerUser = 10,
+        DefaultLanguage = "Unavailable",
+        DefaultProvider = "Unavailable",
+    };
+    var fallbackEnvironment = CreateApplicationEnvironment(testRoot, "provider-fallback", fallbackConfig);
+    var fallbackToken = fallbackEnvironment.Tokens.Issue(
+        "fallback-user",
+        "series",
+        "Fallback",
+        string.Empty,
+        "source-a",
+        "https://example.invalid/series/fallback");
+    var fallbackResult = await fallbackEnvironment.Application.SubmitSelectionAsync(
+        "fallback-user",
+        "Fallback User",
+        fallbackToken,
+        CancellationToken.None);
+    Assert(
+        fallbackResult.Request?.Language == "German Dub" && fallbackResult.Request.Provider == "VOE",
+        "A Jellix request persisted unavailable configured defaults instead of real provider options.");
+
+    var automaticConfig = new PluginConfiguration
+    {
+        MediaForgeUrl = "http://mediaforge.invalid:8080",
+        MaxPendingRequestsPerUser = 10,
+        AutoApproveRequests = true,
+    };
+    var automaticEnvironment = CreateApplicationEnvironment(testRoot, "automatic-queue", automaticConfig);
+    var automaticResult = await automaticEnvironment.Application.SubmitAutomaticAsync(
+        "automatic-user",
+        "Automatic User",
+        new AutomaticMediaRequest
+        {
+            Title = "Automatic",
+            SeriesUrl = "https://example.invalid/series/automatic",
+            Source = "source-a",
+            MediaType = "series",
+            Language = "German Dub",
+            Provider = "VOE",
+        },
+        requireGrant: false,
+        CancellationToken.None);
+    Assert(
+        automaticResult.Disposition == SubmitDisposition.Queued
+        && automaticResult.Request?.MediaForgeQueueId == 42,
+        "A validated Jellyfin request did not reach the MediaForge download queue.");
+
+    var invalidOptionRejected = false;
+    try
+    {
+        await automaticEnvironment.Application.SubmitAutomaticAsync(
+            "invalid-provider-user",
+            "Invalid Provider User",
+            new AutomaticMediaRequest
+            {
+                Title = "Invalid Provider",
+                SeriesUrl = "https://example.invalid/series/invalid-provider",
+                Source = "source-a",
+                MediaType = "series",
+                Language = "German Dub",
+                Provider = "Unavailable",
+            },
+            requireGrant: false,
+            CancellationToken.None);
+    }
+    catch (MediaForgeApplicationException exception) when (exception.StatusCode == System.Net.HttpStatusCode.BadRequest)
+    {
+        invalidOptionRejected = true;
+    }
+
+    Assert(invalidOptionRejected, "An unavailable browser-selected provider reached the request store.");
+
+    var approvalEnvironment = CreateApplicationEnvironment(testRoot, "approval-revalidation", config);
+    var pendingApproval = await approvalEnvironment.Application.SubmitAutomaticAsync(
+        "approval-user",
+        "Approval User",
+        new AutomaticMediaRequest
+        {
+            Title = "Approval",
+            SeriesUrl = "https://example.invalid/series/approval",
+            Source = "source-a",
+            MediaType = "series",
+            Language = "German Dub",
+            Provider = "VOE",
+        },
+        requireGrant: false,
+        CancellationToken.None);
+    approvalEnvironment.Handler.ProviderJson = "{\"providers\":{\"German Dub\":[\"Doodstream\"]}}";
+    var failedApproval = await approvalEnvironment.Application.ApproveAsync(
+        pendingApproval.Request!.Id,
+        "Admin",
+        CancellationToken.None);
+    Assert(
+        failedApproval.Status == RequestStatuses.Failed
+        && approvalEnvironment.Handler.DownloadRequestCount == 0,
+        "Approval queued a request after its provider became unavailable.");
 
     var search = await environment.Application.SearchAsync(
         "user-a",
@@ -1264,7 +1453,11 @@ public sealed class FakeMediaForgeHandler : HttpMessageHandler
 {
     public int RequestCount { get; private set; }
 
+    public int DownloadRequestCount { get; private set; }
+
     public System.Net.HttpStatusCode HealthStatus { get; set; } = System.Net.HttpStatusCode.OK;
+
+    public string ProviderJson { get; set; } = "{\"providers\":{\"German Dub\":[\"VOE\"]}}";
 
     protected override Task<HttpResponseMessage> SendAsync(
         HttpRequestMessage request,
@@ -1282,7 +1475,9 @@ public sealed class FakeMediaForgeHandler : HttpMessageHandler
         {
             "/api/v1/connector/health" => Json(
                 HealthStatus,
-                HealthStatus == System.Net.HttpStatusCode.OK ? "{\"ok\":true}" : "{\"error\":\"safe\"}"),
+                HealthStatus == System.Net.HttpStatusCode.OK
+                    ? "{\"ok\":true,\"capabilities\":{\"status:read\":true,\"library:read\":true,\"queue:read\":true,\"queue:write\":true}}"
+                    : "{\"error\":\"safe\"}"),
             "/api/v1/connector/sources" => Json(System.Net.HttpStatusCode.OK, """
                 {
                   "sources": [
@@ -1304,11 +1499,17 @@ public sealed class FakeMediaForgeHandler : HttpMessageHandler
             "/api/v1/connector/episodes" => Json(System.Net.HttpStatusCode.OK, """
                 {"episodes":[{"url":"https://example.invalid/episode/1","season_number":1,"episode_number":1,"languages":["German Dub"]}]}
                 """),
-            "/api/v1/connector/providers" => Json(System.Net.HttpStatusCode.OK, "{\"German Dub\":[\"VOE\"]}"),
+            "/api/v1/connector/providers" => Json(System.Net.HttpStatusCode.OK, ProviderJson),
             "/api/v1/connector/progress" => Json(System.Net.HttpStatusCode.OK, "{\"items\":[]}"),
-            "/api/v1/connector/download" => Json(System.Net.HttpStatusCode.OK, "{\"queue_id\":42,\"accepted_episode_count\":1}"),
+            "/api/v1/connector/download" => DownloadResponse(),
             _ => Json(System.Net.HttpStatusCode.NotFound, "{\"error\":\"not found\"}"),
         };
+    }
+
+    private Task<HttpResponseMessage> DownloadResponse()
+    {
+        DownloadRequestCount++;
+        return Json(System.Net.HttpStatusCode.OK, "{\"queue_id\":42,\"accepted_episode_count\":1}");
     }
 
     private static Task<HttpResponseMessage> Json(System.Net.HttpStatusCode status, string json)

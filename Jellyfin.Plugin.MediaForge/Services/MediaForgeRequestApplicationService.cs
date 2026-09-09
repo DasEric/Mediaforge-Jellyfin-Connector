@@ -243,6 +243,7 @@ public sealed class MediaForgeRequestApplicationService
             requireGrant: false,
             expectedMediaType: selection.MediaType,
             rateLimitAlreadyApplied: true,
+            allowOptionFallback: true,
             cancellationToken).ConfigureAwait(false);
     }
 
@@ -259,6 +260,7 @@ public sealed class MediaForgeRequestApplicationService
             requireGrant,
             expectedMediaType: null,
             rateLimitAlreadyApplied: false,
+            allowOptionFallback: false,
             cancellationToken);
 
     public async Task<IReadOnlyList<MediaRequest>> ListForUserAsync(
@@ -370,6 +372,7 @@ public sealed class MediaForgeRequestApplicationService
         bool requireGrant,
         string? expectedMediaType,
         bool rateLimitAlreadyApplied,
+        bool allowOptionFallback,
         CancellationToken cancellationToken)
     {
         Normalize(request);
@@ -411,6 +414,12 @@ public sealed class MediaForgeRequestApplicationService
             return new SubmitMediaRequestResult(SubmitDisposition.AlreadyAvailable, null, null, 0);
         }
 
+        var downloadOptions = ResolveDownloadOptions(
+            plan,
+            request.Language,
+            request.Provider,
+            allowOptionFallback);
+
         var calculated = new CreateMediaRequest
         {
             Title = plan.Title,
@@ -419,8 +428,8 @@ public sealed class MediaForgeRequestApplicationService
             MediaType = plan.IsMovie ? "movie" : "series",
             SelectionLabel = plan.SelectionLabel,
             Episodes = plan.MissingUrls.ToList(),
-            Language = request.Language,
-            Provider = request.Provider,
+            Language = downloadOptions.Language,
+            Provider = downloadOptions.Provider,
             Upscale = request.Upscale,
         };
         var maxPending = Math.Clamp(config.MaxPendingRequestsPerUser, 1, 100);
@@ -500,6 +509,12 @@ public sealed class MediaForgeRequestApplicationService
                     await _store.MarkAvailableAsync(id, decidedBy, CancellationToken.None).ConfigureAwait(false);
                     return await _store.GetAsync(id, CancellationToken.None).ConfigureAwait(false) ?? request;
                 }
+
+                _ = ResolveDownloadOptions(
+                    refreshedPlan,
+                    request.Language,
+                    request.Provider,
+                    allowFallback: false);
 
                 if (!await _store.TryUpdateProcessingPlanAsync(
                         id,
@@ -658,7 +673,7 @@ public sealed class MediaForgeRequestApplicationService
                 {
                     if (languages is null)
                     {
-                        languages = new HashSet<string>(episode.Languages, StringComparer.Ordinal);
+                        languages = new HashSet<string>(episode.Languages, StringComparer.OrdinalIgnoreCase);
                     }
                     else
                     {
@@ -682,9 +697,10 @@ public sealed class MediaForgeRequestApplicationService
         }
 
         var selectionLabel = isMovie ? "Film" : missing.Count == 1 ? "1 fehlende Episode" : $"{missing.Count} fehlende Episoden";
-        var providers = missing.Count == 0
+        var providerOptions = missing.Count == 0
             ? new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal)
             : await ReadProviderOptionsAsync(userId, request.Source, missing[0], cancellationToken).ConfigureAwait(false);
+        var providers = FilterProviderOptions(providerOptions, languages);
         return new MissingMediaPlan(
             title,
             description,
@@ -692,7 +708,7 @@ public sealed class MediaForgeRequestApplicationService
             total,
             missing,
             selectionLabel,
-            languages is null ? [] : languages.Order(StringComparer.Ordinal).ToArray(),
+            languages is null ? [] : languages.Order(StringComparer.OrdinalIgnoreCase).ToArray(),
             providers);
     }
 
@@ -717,41 +733,134 @@ public sealed class MediaForgeRequestApplicationService
         {
             var response = await _mediaForge.GetProvidersAsync(episodeUrl, cancellationToken).ConfigureAwait(false);
             _grants.GrantFromJson(userId, source, response);
-            if (response.ValueKind != JsonValueKind.Object)
+            var output = ReadProviderOptions(response);
+            if (output.Count == 0)
             {
-                return new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
-            }
-
-            var output = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
-            foreach (var property in response.EnumerateObject())
-            {
-                if (property.Name.Length is < 1 or > 100
-                    || property.Name.Any(char.IsControl)
-                    || property.Value.ValueKind != JsonValueKind.Array)
-                {
-                    continue;
-                }
-
-                var values = property.Value.EnumerateArray()
-                    .Where(value => value.ValueKind == JsonValueKind.String)
-                    .Select(value => value.GetString()?.Trim() ?? string.Empty)
-                    .Where(value => value.Length is > 0 and <= 100 && !value.Any(char.IsControl))
-                    .Distinct(StringComparer.Ordinal)
-                    .Take(32)
-                    .ToArray();
-                if (values.Length > 0)
-                {
-                    output[property.Name] = values;
-                }
+                throw NoProviderAvailable();
             }
 
             return output;
         }
         catch (MediaForgeException)
         {
-            return new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
+            throw new MediaForgeApplicationException(
+                HttpStatusCode.BadGateway,
+                "MediaForge konnte die verfügbaren Download-Provider nicht ermitteln.");
         }
     }
+
+    internal static IReadOnlyDictionary<string, IReadOnlyList<string>> ReadProviderOptions(JsonElement response)
+    {
+        if (response.ValueKind != JsonValueKind.Object)
+        {
+            return new Dictionary<string, IReadOnlyList<string>>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        var providerRoot = response;
+        if (response.TryGetProperty("providers", out var wrappedProviders))
+        {
+            if (wrappedProviders.ValueKind != JsonValueKind.Object)
+            {
+                return new Dictionary<string, IReadOnlyList<string>>(StringComparer.OrdinalIgnoreCase);
+            }
+
+            providerRoot = wrappedProviders;
+        }
+
+        var output = new Dictionary<string, IReadOnlyList<string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var property in providerRoot.EnumerateObject().Take(32))
+        {
+            var language = property.Name.Trim();
+            if (language.Length is < 1 or > 100
+                || language.Any(char.IsControl)
+                || property.Value.ValueKind != JsonValueKind.Array)
+            {
+                continue;
+            }
+
+            var values = property.Value.EnumerateArray()
+                .Where(value => value.ValueKind == JsonValueKind.String)
+                .Select(value => value.GetString()?.Trim() ?? string.Empty)
+                .Where(value => value.Length is > 0 and <= 100 && !value.Any(char.IsControl))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(32)
+                .ToArray();
+            if (values.Length > 0 && !output.ContainsKey(language))
+            {
+                output[language] = values;
+            }
+        }
+
+        return output;
+    }
+
+    internal static (string Language, string Provider) ResolveDownloadOptions(
+        MissingMediaPlan plan,
+        string preferredLanguage,
+        string preferredProvider,
+        bool allowFallback)
+    {
+        var commonLanguages = plan.Languages.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var usable = plan.Providers
+            .Where(pair => pair.Value.Count > 0
+                && (commonLanguages.Count == 0 || commonLanguages.Contains(pair.Key)))
+            .ToArray();
+        if (usable.Length == 0)
+        {
+            throw NoProviderAvailable();
+        }
+
+        var selectedLanguage = usable.FirstOrDefault(pair =>
+            string.Equals(pair.Key, preferredLanguage, StringComparison.OrdinalIgnoreCase));
+        if (string.IsNullOrEmpty(selectedLanguage.Key))
+        {
+            if (!allowFallback)
+            {
+                throw DownloadOptionsChanged();
+            }
+
+            selectedLanguage = usable[0];
+        }
+
+        var selectedProvider = selectedLanguage.Value.FirstOrDefault(provider =>
+            string.Equals(provider, preferredProvider, StringComparison.OrdinalIgnoreCase));
+        if (selectedProvider is null)
+        {
+            if (!allowFallback)
+            {
+                throw DownloadOptionsChanged();
+            }
+
+            selectedProvider = selectedLanguage.Value[0];
+        }
+
+        return (selectedLanguage.Key, selectedProvider);
+    }
+
+    internal static IReadOnlyDictionary<string, IReadOnlyList<string>> FilterProviderOptions(
+        IReadOnlyDictionary<string, IReadOnlyList<string>> providers,
+        IReadOnlyCollection<string>? commonLanguages)
+    {
+        if (commonLanguages is null)
+        {
+            return providers;
+        }
+
+        var allowed = commonLanguages.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return providers
+            .Where(pair => allowed.Contains(pair.Key))
+            .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static MediaForgeApplicationException NoProviderAvailable()
+        => new(
+            HttpStatusCode.BadGateway,
+            "Für die fehlenden Inhalte ist aktuell kein Download-Provider verfügbar.");
+
+    private static MediaForgeApplicationException DownloadOptionsChanged()
+        => new(
+            HttpStatusCode.BadRequest,
+            "Die gewählte Sprache oder der Provider ist nicht mehr verfügbar. Bitte die Auswahl neu öffnen.");
 
     internal static List<MediaForgeSourceInfo> ReadAllowedSources(
         JsonElement response,

@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 from urllib.parse import parse_qs, quote, urlsplit
 
-from flask import Blueprint, current_app, jsonify, request
+from flask import Blueprint, current_app, g, jsonify, request
 
 from ....mirrors import site_for_url
 from ....models.common.common import get_ffmpeg_progress
 from ....providers import resolve_provider
 from ...db import get_custom_paths, get_queue_item, get_setting
+
+try:
+    from ...db import (
+        default_custom_path_for_url as _mediaforge_default_custom_path_for_url,
+    )
+except ImportError:  # MediaForge 1.5 compatibility
+    _mediaforge_default_custom_path_for_url = None
 
 try:
     from ...routes.v1_api import check_api_key
@@ -30,8 +38,11 @@ _ROUTE_NAMES = {
 _MAX_EPISODES = 500
 _MAX_URL_LENGTH = 2048
 _MAX_PROGRESS_IDS = 200
+_MAX_PROVIDER_LANGUAGES = 32
+_MAX_PROVIDERS_PER_LANGUAGE = 32
 _QUEUE_STATES = {"queued", "running", "completed", "partial", "failed", "cancelled"}
 _PROGRESS_PHASES = {"download", "ffmpeg"}
+_REQUIRED_SCOPES = ("status:read", "library:read", "queue:read", "queue:write")
 
 
 def _without_mediaforge_session_login(view):
@@ -171,6 +182,41 @@ def _read_source_policy(response):
     return payload
 
 
+def _read_provider_options(response):
+    """Normalize MediaForge's provider envelope into the connector contract."""
+    payload = response.get_json(silent=True)
+    if not isinstance(payload, dict) or not isinstance(payload.get("providers"), dict):
+        return None
+
+    output = {}
+    seen_languages = set()
+    for language, providers in payload["providers"].items():
+        if len(output) >= _MAX_PROVIDER_LANGUAGES:
+            break
+        if not _safe_text(language, 100) or not isinstance(providers, list):
+            continue
+        language = language.strip()
+        language_key = language.casefold()
+        if language_key in seen_languages:
+            continue
+        clean = []
+        seen = set()
+        for provider in providers:
+            if len(clean) >= _MAX_PROVIDERS_PER_LANGUAGE:
+                break
+            if not _safe_text(provider, 100):
+                continue
+            value = provider.strip()
+            key = value.casefold()
+            if key not in seen:
+                seen.add(key)
+                clean.append(value)
+        if clean:
+            seen_languages.add(language_key)
+            output[language] = clean
+    return output
+
+
 def _validate_url_argument():
     value = request.args.get("url", "")
     if not _is_mediaforge_url(value):
@@ -244,6 +290,14 @@ def _accepted_episode_count(queue_id: int):
 
 def _default_custom_path_id(series_url: str):
     """Mirror MediaForge's own per-site default-path selection."""
+    if _mediaforge_default_custom_path_for_url is not None:
+        path_id = _mediaforge_default_custom_path_for_url(series_url)
+        if path_id is None:
+            return None
+        if type(path_id) is not int or path_id <= 0:
+            raise ValueError("invalid MediaForge custom-path identifier")
+        return path_id
+
     site = site_for_url(series_url)
     if site is None:
         return None
@@ -296,6 +350,8 @@ def create_blueprint(app, enabled_setting_key: str, module_version: str = "unkno
         key: _without_mediaforge_session_login(app.view_functions[name])
         for key, name in _ROUTE_NAMES.items()
     }
+    download_parameters = inspect.signature(internal["download"]).parameters
+    download_accepts_payload = "payload" in download_parameters
 
     def late_internal(endpoint: str):
         # MediaForge registers browse/image routes after discovering modules.
@@ -324,6 +380,11 @@ def create_blueprint(app, enabled_setting_key: str, module_version: str = "unkno
                 "ok": True,
                 "module": "mediaforge_jellyfin_connector",
                 "version": module_version,
+                "capabilities": {
+                    scope: scope in getattr(g, "_v1_scopes", ())
+                    or "*" in getattr(g, "_v1_scopes", ())
+                    for scope in _REQUIRED_SCOPES
+                },
             }
         )
 
@@ -440,7 +501,13 @@ def create_blueprint(app, enabled_setting_key: str, module_version: str = "unkno
         validation_error = _validate_url_argument()
         if validation_error:
             return validation_error
-        return internal["providers"]()
+        upstream = current_app.make_response(internal["providers"]())
+        if upstream.status_code != 200:
+            return upstream
+        providers = _read_provider_options(upstream)
+        if providers is None:
+            return jsonify({"error": "invalid providers response"}), 502
+        return jsonify(providers)
 
     @bp.post("/api/v1/connector/download")
     def api_connector_download():
@@ -488,13 +555,21 @@ def create_blueprint(app, enabled_setting_key: str, module_version: str = "unkno
                 type(exc).__name__,
             )
             return jsonify({"error": "default download path resolution failed"}), 503
+        queue_payload = dict(body)
         if custom_path_id is not None:
-            # Flask returns the same cached JSON object to MediaForge's core
-            # handler below. The connector validates the public body first and
-            # only then adds this server-resolved, non-client-controlled value.
-            body["custom_path_id"] = custom_path_id
+            queue_payload["custom_path_id"] = custom_path_id
 
-        upstream = current_app.make_response(internal["download"]())
+        if download_accepts_payload:
+            # MediaForge 1.6+ exposes an explicit internal-dispatch contract.
+            upstream = current_app.make_response(
+                internal["download"](payload=queue_payload)
+            )
+        else:
+            # MediaForge 1.5 reads the cached Flask request JSON. Mutate it only
+            # after validating every public field and resolving the path here.
+            body.clear()
+            body.update(queue_payload)
+            upstream = current_app.make_response(internal["download"]())
         if upstream.status_code != 200:
             return upstream
         payload = upstream.get_json(silent=True)

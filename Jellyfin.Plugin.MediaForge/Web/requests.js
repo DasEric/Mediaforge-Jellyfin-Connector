@@ -224,20 +224,31 @@ export default function (view, params) {
       state.detail = Object.assign(payload, { title: plan.title || payload.title, plan });
       q('detail-title').textContent = state.detail.title;
       q('description').textContent = plan.description || 'Keine Beschreibung verfügbar.';
-      const languages = Array.isArray(plan.languages) && plan.languages.length ? plan.languages : [state.status.defaultLanguage || 'German Dub'];
+      const advertisedProviderLanguages = plan.providers && typeof plan.providers === 'object'
+        ? Object.keys(plan.providers).filter((language) => Array.isArray(plan.providers[language]) && plan.providers[language].length)
+        : [];
+      const plannedLanguages = Array.isArray(plan.languages) ? plan.languages : [];
+      const providerLanguages = plannedLanguages.length
+        ? advertisedProviderLanguages.filter((language) => plannedLanguages.some((candidate) => String(candidate).toLowerCase() === language.toLowerCase()))
+        : advertisedProviderLanguages;
+      const languages = providerLanguages.slice();
       setOptions(q('language'), languages, state.status.defaultLanguage);
       const syncProviders = () => {
         const available = plan.providers && Array.isArray(plan.providers[q('language').value]) ? plan.providers[q('language').value] : [];
-        setOptions(q('provider'), available.length ? available : [state.status.defaultProvider || 'VOE'], state.status.defaultProvider);
+        setOptions(q('provider'), available, state.status.defaultProvider);
+        q('request').disabled = !plan.missing_count || available.length === 0;
       };
       q('language').onchange = syncProviders; syncProviders();
       q('plan').innerHTML = '';
       const summary = document.createElement('div'); summary.className = 'mf-plan ' + (plan.missing_count ? '' : 'complete');
       if (plan.missing_count) {
-        summary.textContent = plan.is_movie
+        const missingText = plan.is_movie
           ? 'Der Film fehlt und kann angefragt werden.'
           : plan.missing_count + ' von ' + plan.total_count + ' Episoden fehlen. Es werden ausschließlich diese fehlenden Episoden angefragt.';
-        q('request').disabled = false;
+        summary.textContent = providerLanguages.length
+          ? missingText
+          : missingText + ' MediaForge meldet dafür derzeit keinen verfügbaren Download-Provider.';
+        q('request').disabled = providerLanguages.length === 0;
       } else {
         summary.textContent = plan.is_movie
           ? 'Der Film ist bereits vorhanden und wird nicht erneut eingereiht.'
@@ -248,7 +259,7 @@ export default function (view, params) {
   }
   function setOptions(select, values, preferred) { const clean = Array.from(new Set(values.filter(Boolean))); select.innerHTML = ''; clean.forEach((value) => { const option = document.createElement('option'); option.value = value; option.textContent = value; select.appendChild(option); }); if (clean.includes(preferred)) select.value = preferred; }
   q('request').addEventListener('click', async () => {
-    if (!state.detail || !state.detail.plan || !state.detail.plan.missing_count) return;
+    if (!state.detail || !state.detail.plan || !state.detail.plan.missing_count || !q('language').value || !q('provider').value) return;
     const detail = state.detail;
     const generation = detailGeneration;
     q('request').disabled = true;
@@ -258,7 +269,7 @@ export default function (view, params) {
       if (disposed || generation !== detailGeneration || !view.isConnected) return;
       const message = result.status === 'queued' ? 'Nur die fehlenden Inhalte wurden direkt an MediaForge übergeben.' : 'Die Anfrage für die fehlenden Inhalte wurde an den Administrator gesendet.';
       closeDetail(); notice(message); switchTab('mine');
-    } catch (error) { if (!disposed && generation === detailGeneration && view.isConnected) notice(error.message, true); } finally { if (!disposed && generation === detailGeneration && view.isConnected) q('request').disabled = false; }
+    } catch (error) { if (!disposed && generation === detailGeneration && view.isConnected) notice(error.message, true); } finally { if (!disposed && generation === detailGeneration && view.isConnected) q('request').disabled = !q('language').value || !q('provider').value; }
   });
   function closeDetail() { detailGeneration++; state.detail = null; q('overlay').style.display = 'none'; }
   q('close').addEventListener('click', closeDetail); q('cancel').addEventListener('click', closeDetail); q('overlay').addEventListener('click', (e) => { if (e.target === q('overlay')) closeDetail(); });
