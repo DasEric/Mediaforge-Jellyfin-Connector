@@ -28,6 +28,15 @@ movie and TV sources enabled in MediaForge.
 - Adult sources remain blocked for API-key requests by MediaForge's central
   age gate and cannot be enabled from Jellyfin.
 
+## Copyright
+
+Copyright © 2026 DasEric.
+
+This project is licensed under the GNU General Public License v3.0 or later.
+
+Forks and modified versions must comply with the GPLv3 license,
+including preservation of applicable copyright and license notices.
+
 ## Architecture
 
 The project intentionally consists of two components:
